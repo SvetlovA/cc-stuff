@@ -1,0 +1,13 @@
+{
+  "name": "SvetlovA-cc-stuff",
+  "owner": {
+    "name": "SvetlovA"
+  },
+  "plugins": [
+    {
+      "name": "pr-review-toolkit",
+      "source": "./pr-review-toolkit",
+      "description": "Address GitHub PR review comments automatically — fetch active threads, apply code fixes, resolve or reply, then commit"
+    }
+  ]
+}

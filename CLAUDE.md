@@ -6,6 +6,8 @@ This repository is a public collection of Claude Code plugins. Each plugin lives
 
 ```
 cc-stuff/
+├── .claude-plugin/
+│   └── marketplace.json    # Marketplace registry — lists all plugins
 ├── <plugin-name>/          # One directory per plugin
 │   ├── .claude-plugin/
 │   │   └── plugin.json     # Required: plugin manifest (name, version, description)
@@ -20,13 +22,35 @@ cc-stuff/
 └── README.md               # Marketplace overview
 ```
 
+## Marketplace Registry
+
+`.claude-plugin/marketplace.json` at the repo root is what makes this repo installable as a marketplace. Claude Code reads it when a user installs from the GitHub URL.
+
+Format:
+```json
+{
+  "name": "SvetlovA-cc-stuff",
+  "owner": { "name": "SvetlovA" },
+  "plugins": [
+    {
+      "name": "plugin-name",
+      "source": "./plugin-name",
+      "description": "One-line description"
+    }
+  ]
+}
+```
+
+**When adding a new plugin, always add an entry here** pointing to the plugin's directory.
+
 ## Adding a New Plugin
 
 1. Create a top-level directory with a kebab-case name (e.g. `git-workflow-tools`)
-2. Add `.claude-plugin/plugin.json` with at minimum `name`, `version`, and `description`
+2. Add `.claude-plugin/plugin.json` inside it with at minimum `name`, `version`, and `description`
 3. Create components in `skills/`, `agents/`, `hooks/` as needed
 4. Add a `README.md` describing what the plugin does and how to install it
-5. Update the root `README.md` plugins table
+5. Add an entry to `.claude-plugin/marketplace.json` at the repo root
+6. Update the root `README.md` plugins table
 
 ## Skill Writing Conventions
 
