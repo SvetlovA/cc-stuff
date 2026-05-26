@@ -7,7 +7,7 @@
     {
       "name": "pr-review-toolkit",
       "source": "./pr-review-toolkit",
-      "description": "Address GitHub PR review comments automatically — fetch active threads, apply code fixes, resolve or reply, then commit"
+      "description": "Address GitHub PR review comments — fetch active threads, recommend plan vs. on-the-fly mode, apply code fixes, resolve or reply, then commit"
     }
   ]
 }

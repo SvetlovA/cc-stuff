@@ -1,6 +1,6 @@
 {
   "name": "pr-review-toolkit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Tools for working with GitHub pull request reviews — fetch active comments, apply code fixes, and resolve threads automatically.",
   "author": {
     "name": "SvetlovA",
@@ -9,5 +9,12 @@
   "homepage": "https://github.com/SvetlovA/cc-stuff/tree/master/pr-review-toolkit",
   "repository": "https://github.com/SvetlovA/cc-stuff",
   "license": "MIT",
-  "keywords": ["github", "pull-request", "code-review", "automation"]
+  "keywords": ["github", "pull-request", "code-review", "automation"],
+  "optionalDependencies": [
+    {
+      "name": "planning",
+      "source": "https://github.com/umputun/cc-thingz",
+      "reason": "Enables structured plan creation via /planning:make when addressing review comments"
+    }
+  ]
 }

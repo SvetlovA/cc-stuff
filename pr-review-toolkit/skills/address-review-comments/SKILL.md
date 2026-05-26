@@ -3,7 +3,7 @@ name: Address Review Comments
 description: This skill should be used when the user asks to "address review comments", "fix PR comments", "resolve review feedback", "apply code review suggestions", "address PR feedback", "work through review comments", "go through PR reviews", "address my own PR comments", "self-review PR", or wants to systematically process GitHub pull request review comments (including comments left by themselves), apply the suggested code fixes, and mark threads as resolved.
 argument-hint: "[pr-number]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
-version: 0.1.0
+version: 0.2.0
 ---
 
 # Address Review Comments
@@ -127,9 +127,70 @@ Inline threads:
 General comments:
   1. "Error messages throughout are too generic, users can't tell what went wrong" (alice)
   2. "Missing migration script for the new column" (bob)
-
-Applying fixes...
 ```
+
+## Step 5b — Recommend an Addressing Mode and Ask the User
+
+After presenting the summary, evaluate the scope of work and give a concrete recommendation before asking the user how to proceed.
+
+### Evaluate Complexity
+
+Score the work across these signals:
+
+| Signal | Points |
+|---|---|
+| Total comment count > 5 | +2 |
+| Changes span 3+ distinct files | +2 |
+| Any comment implies refactoring / extraction / architectural change | +2 |
+| Any comment is ambiguous or requires interpretation | +1 |
+| All comments are in 1–2 files and self-contained | −2 |
+
+**Score ≥ 3 → recommend Plan. Score < 3 → recommend Address on the fly.**
+
+### Write the Recommendation
+
+Present a short, opinionated recommendation (2–4 sentences) explaining what you observed and why one mode fits better. Examples:
+
+- _"5 comments, all in one file, each fix is a single targeted change — addressing on the fly is the fastest path here."_
+- _"8 comments across 4 files, two of which involve extracting shared helpers. A plan lets you see the full picture before touching any code and avoids conflicting edits across files."_
+
+### Ask the User to Choose
+
+```
+How would you like to proceed?
+  [1] Address on the fly — apply each fix now, then resolve/reply to the thread
+  [2] Create a plan first — produce a structured implementation plan before touching any code
+```
+
+Wait for the user's choice before continuing.
+
+### If the User Chooses "Create a plan first"
+
+Check whether `planning:make` is available by scanning the skills list in the current session (it appears as `planning:make` when the [planning plugin](https://github.com/umputun/cc-thingz) is installed).
+
+**If `planning:make` is available:**
+
+Follow the `planning:make` skill instructions with this task description, which carries the full context gathered in Steps 1–4 so the skill can skip its discovery phase and start directly with the interactive questions:
+
+> Address PR #NUMBER review comments — X inline thread(s) and Y general comment(s) across the following files: [list]. Key changes needed: [one-line summary per comment]. **The final task in the plan must be: resolve or reply to each review thread using the GitHub API (GraphQL mutation for inline threads, REST POST for general comments) — see the address-review-comments skill Step 7 for the exact commands.**
+
+`planning:make` will ask the user what to do after the plan is created (review, implement, done). **Stop here — do not proceed to Step 6.**
+
+**If `planning:make` is not available:**
+
+Tell the user:
+
+> The `planning` plugin is not installed. Install it to get full structured planning support:
+>
+> See: https://github.com/umputun/cc-thingz
+>
+> Once installed, re-run `/pr-review-toolkit:address-review-comments` and choose "Create a plan first" again.
+
+Then ask the user whether to fall back to addressing on the fly now, or stop and install the plugin first. **Do not proceed to Step 6 automatically.**
+
+### If the User Chooses "Address on the fly"
+
+Continue immediately to Step 6.
 
 ## Step 6 — Apply Code Fixes
 
