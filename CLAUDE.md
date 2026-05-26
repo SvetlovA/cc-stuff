@@ -68,6 +68,22 @@ These conventions apply to all skills in this repo:
 - Be descriptive: prefer `pr-review-toolkit` over `prt`
 - A plugin name should describe its domain, not a specific feature
 
+## Optional Plugin Dependencies
+
+When a plugin benefits from another plugin but does not require it, declare it in `plugin.json` under `optionalDependencies`:
+
+```json
+"optionalDependencies": [
+  {
+    "name": "plugin-name",
+    "source": "https://github.com/owner/repo",
+    "reason": "One sentence explaining which feature uses it and why"
+  }
+]
+```
+
+The runtime does not enforce this field — it is documentation. Skills that use an optional dependency must detect at runtime whether the dependency's skills appear in the active session, and fall back gracefully (offer install instructions or an alternative path) when they do not.
+
 ## Path Portability
 
 Never hardcode absolute paths inside hook commands or MCP server configs. Use `$CLAUDE_PLUGIN_ROOT` so the plugin works regardless of where it's installed.

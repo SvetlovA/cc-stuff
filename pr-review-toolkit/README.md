@@ -10,9 +10,11 @@ Systematically addresses all active review comments on a pull request:
 
 1. **Detects the current PR** (or lets you select one from a list)
 2. **Fetches all active comments** — inline review threads and general PR comments, filtering out already-resolved, outdated, and already-replied-to threads
-3. **Applies code fixes** for each comment using Claude's full coding capabilities
-4. **Resolves or replies** — marks threads resolved via GitHub's GraphQL API, or posts a reply with a resolution description when resolution isn't possible
-5. **Prompts for action** — commit the changes immediately or leave them for manual review
+3. **Presents a summary** of all active threads and evaluates scope
+4. **Recommends a mode** and asks how to proceed:
+   - **Address on the fly** — apply each fix immediately, resolve/reply to threads, then prompt to commit (recommended for ≤ 5 comments in 1–2 files)
+   - **Create a plan first** — delegates to `/planning:make` to produce a structured implementation plan; the plan's final task covers thread resolution (recommended for complex or cross-file changes)
+5. **Resolves or replies** — marks threads resolved via GitHub's GraphQL API, or posts a reply with a resolution description when resolution isn't possible
 
 ## Installation
 
@@ -37,6 +39,10 @@ cc --plugin-dir ./cc-stuff/pr-review-toolkit
 - [GitHub CLI (`gh`)](https://cli.github.com/) — installed and authenticated (`gh auth login`)
 - A git repository with a GitHub remote
 - Pull request open on GitHub
+
+## Optional dependency
+
+Plan mode uses the **planning plugin** from [umputun/cc-thingz](https://github.com/umputun/cc-thingz) to produce a structured implementation plan via `/planning:make`. Without it, the skill prompts you to install it or fall back to on-the-fly mode. The plugin works fully without this dependency.
 
 ## Usage
 
