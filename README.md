@@ -6,7 +6,7 @@ A public collection of Claude Code plugins for developer workflows. Install any 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.2.0 |
+| [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.3.0 |
 
 ## Installing a Plugin
 
@@ -30,10 +30,10 @@ cc --plugin-dir ./cc-stuff/<plugin-name>
 Addresses GitHub PR review comments end-to-end:
 
 - Detects the current PR or lets you pick from a list
-- Fetches **all active** inline threads and general comments (skips resolved, outdated, and already-replied threads)
+- Fetches **all active** inline threads and general comments (skips resolved and already-replied threads; outdated threads are included and labeled)
 - Evaluates scope and recommends **address on the fly** (simple, few files) or **create a plan first** (complex, cross-file, architectural)
 - On the fly: applies fixes and resolves threads in one pass, then prompts to commit
-- Plan mode: delegates to `/planning:make` (optional dependency) to produce a structured plan with thread resolution as a final task
+- Plan mode: delegates to `/planning:make` (optional dependency) to produce a structured plan ending with thread resolution and `git push`
 
 **Invoke with:** `/pr-review-toolkit:address-review-comments [pr-number]`
 

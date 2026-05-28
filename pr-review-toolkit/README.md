@@ -9,11 +9,11 @@ A Claude Code plugin for working through GitHub pull request reviews. Fetch acti
 Systematically addresses all active review comments on a pull request:
 
 1. **Detects the current PR** (or lets you select one from a list)
-2. **Fetches all active comments** — inline review threads and general PR comments, filtering out already-resolved, outdated, and already-replied-to threads
+2. **Fetches all active comments** — inline review threads and general PR comments, filtering out already-resolved and already-replied-to threads; outdated threads (comments on lines that no longer exist in the current diff) are **included** and labeled so the fix can be applied at the nearest equivalent location
 3. **Presents a summary** of all active threads and evaluates scope
 4. **Recommends a mode** and asks how to proceed:
    - **Address on the fly** — apply each fix immediately, resolve/reply to threads, then prompt to commit (recommended for ≤ 5 comments in 1–2 files)
-   - **Create a plan first** — delegates to `/planning:make` to produce a structured implementation plan; the plan's final task covers thread resolution (recommended for complex or cross-file changes)
+   - **Create a plan first** — delegates to `/planning:make` to produce a structured implementation plan; the plan ends with two dedicated tasks: resolve/reply to all threads, then `git push` to update the PR (recommended for complex or cross-file changes)
 5. **Resolves or replies** — marks threads resolved via GitHub's GraphQL API, or posts a reply with a resolution description when resolution isn't possible
 
 ## Installation
@@ -68,9 +68,10 @@ If no PR is detected, the skill lists open PRs and prompts you to select one.
 
 The skill skips:
 - Threads marked as **resolved** in GitHub's UI (`isResolved: true`)
-- Comments on **outdated** diff positions (`isOutdated: true`) — the code has moved
 - Threads where the **last reply** already indicates resolution (contains "fixed", "done", "resolved", "LGTM", etc.)
 - Comments by **bots** (e.g. CI tools, Dependabot)
+
+**Outdated threads are included.** When a comment was left on a line that no longer exists in the current diff (`isOutdated: true`), the skill labels it in the summary and finds the best matching location in the file to apply the fix. If no equivalent location exists (code was deleted), it posts a reply explaining the outcome.
 
 Everything else is treated as actionable feedback.
 
