@@ -3,7 +3,7 @@ name: Address Review Comments
 description: This skill should be used when the user asks to "address review comments", "fix PR comments", "resolve review feedback", "apply code review suggestions", "address PR feedback", "work through review comments", "go through PR reviews", "address my own PR comments", "self-review PR", or wants to systematically process GitHub pull request review comments (including comments left by themselves), apply the suggested code fixes, and mark threads as resolved.
 argument-hint: "[pr-number]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
-version: 0.2.0
+version: 0.3.0
 ---
 
 # Address Review Comments
@@ -84,8 +84,9 @@ gh api graphql -f query='
 
 **Keep only threads where:**
 - `isResolved` is `false`
-- `isOutdated` is `false`
 - The thread does NOT already have a resolution reply
+
+Include threads where `isOutdated` is `true` — a comment on a line that no longer exists in the current diff is still actionable feedback. Track each thread's `isOutdated` value so Step 5 can label them and Step 6 can locate the best matching code position.
 
 **Resolution reply detection — requires ALL of:**
 1. The thread has **more than one comment** (at least one reply exists). Single-comment threads are always active — a review comment like "This should be fixed by extracting a helper" contains the word "fixed" but is clearly the original feedback, not a resolution.
@@ -117,17 +118,19 @@ Comments from the repo owner or PR author are always actionable — include them
 Before changing any code, show the user what was found:
 
 ```
-Found 3 active review thread(s) and 2 general comment(s):
+Found 3 active review thread(s) (1 outdated) and 2 general comment(s):
 
 Inline threads:
   1. [src/auth/middleware.ts:47] "Extract this into a helper — it's used in three places" (alice)
-  2. [tests/order.test.ts:92] "This test doesn't cover the null input case" (bob)
+  2. [tests/order.test.ts:92] "This test doesn't cover the null input case" (bob)  [OUTDATED — line moved/removed]
   3. [README.md:12] "Broken link in the installation section" (carol)
 
 General comments:
   1. "Error messages throughout are too generic, users can't tell what went wrong" (alice)
   2. "Missing migration script for the new column" (bob)
 ```
+
+Label any thread whose `isOutdated` is `true` with `[OUTDATED — line moved/removed]` so the user understands the context when reviewing fixes.
 
 ## Step 5b — Recommend an Addressing Mode and Ask the User
 
@@ -172,7 +175,7 @@ Check whether `planning:make` is available by scanning the skills list in the cu
 
 Follow the `planning:make` skill instructions with this task description, which carries the full context gathered in Steps 1–4 so the skill can skip its discovery phase and start directly with the interactive questions:
 
-> Address PR #NUMBER review comments — X inline thread(s) and Y general comment(s) across the following files: [list]. Key changes needed: [one-line summary per comment]. **The final task in the plan must be: resolve or reply to each review thread using the GitHub API (GraphQL mutation for inline threads, REST POST for general comments) — see the address-review-comments skill Step 7 for the exact commands.**
+> Address PR #NUMBER review comments — X inline thread(s) (N outdated) and Y general comment(s) across the following files: [list]. Key changes needed: [one-line summary per comment]. **The plan must end with these two tasks in order: (1) resolve or reply to each review thread using the GitHub API (GraphQL mutation for inline threads, REST POST for general comments) — see the address-review-comments skill Step 7 for the exact commands; (2) push the branch to the remote with `git push` to update the PR.**
 
 `planning:make` will ask the user what to do after the plan is created (review, implement, done). **Stop here — do not proceed to Step 6.**
 
@@ -201,6 +204,8 @@ Process each active comment in order. For each:
 3. Determine the minimal correct fix
 4. Apply the fix using `Edit` (for targeted changes) or `Write` (for new files)
 5. Record a one-sentence description of what was changed for use in Step 7
+
+**For outdated inline threads** (`isOutdated: true`): the original line no longer exists in the current diff. Read the full `path` file to find the best matching location (same function, same logic block, or the nearest equivalent). Apply the fix there. If no matching location exists (code was deleted), prepare a reply explaining what was done or why the change no longer applies.
 
 Group related comments that touch the same file or function — handle them together to avoid conflicting edits.
 
