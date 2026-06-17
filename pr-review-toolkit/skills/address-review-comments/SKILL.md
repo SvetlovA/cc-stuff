@@ -1,14 +1,14 @@
 ---
 name: Address Review Comments
-description: This skill should be used when the user asks to "address review comments", "fix PR comments", "resolve review feedback", "apply code review suggestions", "address PR feedback", "work through review comments", "go through PR reviews", "address my own PR comments", "self-review PR", or wants to systematically process GitHub pull request review comments (including comments left by themselves), apply the suggested code fixes, and mark threads as resolved.
+description: This skill should be used when the user asks to "address review comments", "fix PR comments", "resolve review feedback", "apply code review suggestions", "address PR feedback", "work through review comments", "go through PR reviews", "address my own PR comments", "self-review PR", or wants to systematically process GitHub pull request review comments (including comments left by themselves) and apply the suggested code fixes.
 argument-hint: "[pr-number]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
-version: 0.3.0
+version: 0.4.0
 ---
 
 # Address Review Comments
 
-Systematically fetch all active GitHub PR review comments, apply the suggested code fixes, then resolve or reply to each comment. After completing all fixes, prompt the user to commit or leave changes for manual review.
+Systematically fetch all active GitHub PR review comments and apply the suggested code fixes. Thread resolution and committing/pushing changes are left for the user to perform manually.
 
 **Designed for iterative self-review:** leave comments on your own PR, run this skill to address them, resolve the threads, then repeat — each iteration only picks up comments that were added since the last run or that were not yet resolved.
 
@@ -175,7 +175,7 @@ Check whether `planning:make` is available by scanning the skills list in the cu
 
 Follow the `planning:make` skill instructions with this task description, which carries the full context gathered in Steps 1–4 so the skill can skip its discovery phase and start directly with the interactive questions:
 
-> Address PR #NUMBER review comments — X inline thread(s) (N outdated) and Y general comment(s) across the following files: [list]. Key changes needed: [one-line summary per comment]. **The plan must end with these two tasks in order: (1) resolve or reply to each review thread using the GitHub API (GraphQL mutation for inline threads, REST POST for general comments) — see the address-review-comments skill Step 7 for the exact commands; (2) push the branch to the remote with `git push` to update the PR.**
+> Address PR #NUMBER review comments — X inline thread(s) (N outdated) and Y general comment(s) across the following files: [list]. Key changes needed: [one-line summary per comment]. **After applying all fixes, list the changed files so the user can review, commit, and push manually.**
 
 `planning:make` will ask the user what to do after the plan is created (review, implement, done). **Stop here — do not proceed to Step 6.**
 
@@ -203,94 +203,34 @@ Process each active comment in order. For each:
 2. For inline comments: read the file at the indicated `path` around the indicated `line` for context
 3. Determine the minimal correct fix
 4. Apply the fix using `Edit` (for targeted changes) or `Write` (for new files)
-5. Record a one-sentence description of what was changed for use in Step 7
+5. Record a one-sentence description of what was changed for the final summary in Step 7
 
-**For outdated inline threads** (`isOutdated: true`): the original line no longer exists in the current diff. Read the full `path` file to find the best matching location (same function, same logic block, or the nearest equivalent). Apply the fix there. If no matching location exists (code was deleted), prepare a reply explaining what was done or why the change no longer applies.
+**For outdated inline threads** (`isOutdated: true`): the original line no longer exists in the current diff. Read the full `path` file to find the best matching location (same function, same logic block, or the nearest equivalent). Apply the fix there. If no matching location exists (code was deleted), note in the summary that the code was removed and the comment no longer applies.
 
 Group related comments that touch the same file or function — handle them together to avoid conflicting edits.
 
-When a comment is ambiguous, apply the most reasonable interpretation. When a comment is a question rather than a requested change (e.g. "Is this intentional?"), prepare a text reply instead of a code change.
+When a comment is ambiguous, apply the most reasonable interpretation. When a comment is a question rather than a requested change (e.g. "Is this intentional?"), note the question in the summary and leave the code unchanged so the user can decide.
 
-When a comment cannot be addressed in code at all (out-of-scope, architectural question, requires discussion), prepare a reply explaining why it was not addressed in code.
+When a comment cannot be addressed in code at all (out-of-scope, architectural question, requires discussion), note in the summary why no code change was made.
 
-## Step 7 — Resolve or Reply to Each Comment
+## Step 7 — Report Changes
 
-After all code changes are applied:
-
-**For inline review threads — attempt GraphQL resolution first:**
-
-```bash
-gh api graphql -f query='
-mutation {
-  resolveReviewThread(input: {threadId: "THREAD_NODE_ID"}) {
-    thread { isResolved }
-  }
-}'
-```
-
-If this succeeds, the thread is marked resolved in GitHub's UI.
-
-**If GraphQL resolution fails** (insufficient permissions or the comment requires acknowledgment):
-
-Reply to the thread using the `databaseId` of the first comment in the thread:
-
-```bash
-gh api repos/OWNER/REPO/pulls/PR_NUMBER/comments \
-  --method POST \
-  -f body="Fixed: RESOLUTION_DESCRIPTION" \
-  -F in_reply_to=COMMENT_DATABASE_ID
-```
-
-**For general PR comments** (no resolve mechanism — always reply):
-
-```bash
-gh api repos/OWNER/REPO/issues/PR_NUMBER/comments \
-  --method POST \
-  -f body="Addressed: RESOLUTION_DESCRIPTION"
-```
-
-## Step 8 — Prompt for Commit
-
-After all fixes and resolutions are complete, show a final summary:
+After all code changes are applied, show a final summary:
 
 ```
 Done. Applied fixes for 5 comment(s):
 
-  ✓ [src/auth/middleware.ts:47]  Extracted shared logic into authHelper()  — resolved
-  ✓ [tests/order.test.ts:92]     Added null-input test case               — resolved
-  ✓ [README.md:12]               Fixed installation link                  — resolved
-  ✓ General: Error messages      Improved messages in 4 handlers          — replied
-  ✓ General: Migration script    Added migrations/add_user_column.sql     — replied
+  ✓ [src/auth/middleware.ts:47]  Extracted shared logic into authHelper()
+  ✓ [tests/order.test.ts:92]     Added null-input test case
+  ✓ [README.md:12]               Fixed installation link
+  ✓ General: Error messages      Improved messages in 4 handlers
+  ✓ General: Migration script    Added migrations/add_user_column.sql
 
 Files changed: src/auth/middleware.ts, src/auth/helpers.ts, tests/order.test.ts,
                README.md, migrations/add_user_column.sql
-
-What would you like to do?
-  [1] Commit changes
-  [2] Finish without committing — leave for manual review
 ```
 
-Wait for the user's response.
-
-**If the user chooses to commit:**
-
-Stage only the modified/created files (do not use `git add -A` blindly — list specific changed files):
-
-```bash
-git add <file1> <file2> ...
-git commit -m "Address PR #NUMBER review comments
-
-- <one-line summary of the most significant change>
-- <other key changes if notable>
-
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
-```
-
-Remind the user to run `git push` to update the PR branch, but do not push automatically.
-
-**If the user chooses manual review:**
-
-Leave the working tree as-is and report completion.
+Thread resolution (marking threads as resolved on GitHub) and committing/pushing the branch are left for the user to perform manually.
 
 ## Additional Resources
 

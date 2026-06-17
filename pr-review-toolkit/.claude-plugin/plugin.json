@@ -1,7 +1,7 @@
 {
   "name": "pr-review-toolkit",
-  "version": "0.3.0",
-  "description": "Tools for working with GitHub pull request reviews — fetch active comments, apply code fixes, and resolve threads automatically.",
+  "version": "0.4.0",
+  "description": "Tools for working with GitHub pull request reviews — fetch active comments and apply code fixes. Thread resolution and pushing are left to the user.",
   "author": {
     "name": "SvetlovA",
     "url": "https://github.com/SvetlovA"
