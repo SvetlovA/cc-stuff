@@ -3,7 +3,7 @@ name: Address Review Comments
 description: This skill should be used when the user asks to "address review comments", "fix PR comments", "resolve review feedback", "apply code review suggestions", "address PR feedback", "work through review comments", "go through PR reviews", "address my own PR comments", "self-review PR", or wants to systematically process GitHub pull request review comments (including comments left by themselves) and apply the suggested code fixes.
 argument-hint: "[pr-number]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
-version: 0.4.0
+version: 0.5.0
 ---
 
 # Address Review Comments
@@ -51,7 +51,7 @@ Use these as `OWNER` and `REPO` throughout the rest of the workflow.
 
 ## Step 3 — Fetch Active Inline Review Threads
 
-Use the GraphQL API to retrieve review threads with their resolution and outdated status. The REST API does not expose `isResolved` or `isOutdated` — GraphQL is required here.
+Use the GraphQL API to retrieve review threads. The REST API does not expose `isResolved` or `isOutdated` — GraphQL is required here. Each comment node must include `pullRequestReview { state }` to detect pending (unsubmitted) reviews.
 
 ```bash
 gh api graphql -f query='
@@ -73,6 +73,7 @@ gh api graphql -f query='
               originalLine
               author { login }
               createdAt
+              pullRequestReview { state }
             }
           }
         }
@@ -82,11 +83,15 @@ gh api graphql -f query='
 }'
 ```
 
-**Keep only threads where:**
+**Keep only threads where ALL of the following are true:**
 - `isResolved` is `false`
+- `isOutdated` is `false`
+- At least one comment has `pullRequestReview.state` other than `PENDING` (i.e. the thread originates from a submitted review)
 - The thread does NOT already have a resolution reply
 
-Include threads where `isOutdated` is `true` — a comment on a line that no longer exists in the current diff is still actionable feedback. Track each thread's `isOutdated` value so Step 5 can label them and Step 6 can locate the best matching code position.
+Skip any thread where `isOutdated` is `true` — comments on lines that no longer exist in the current diff are not actionable and could produce incorrect edits.
+
+Skip any thread where every comment's `pullRequestReview.state` is `PENDING` — those are unsubmitted draft comments not yet visible to other reviewers.
 
 **Resolution reply detection — requires ALL of:**
 1. The thread has **more than one comment** (at least one reply exists). Single-comment threads are always active — a review comment like "This should be fixed by extracting a helper" contains the word "fixed" but is clearly the original feedback, not a resolution.
@@ -107,30 +112,28 @@ gh api repos/OWNER/REPO/issues/PR_NUMBER/comments --paginate
 
 General comments arrive as a flat chronological list — there is no threading. Filter out:
 - Comments where `user.login` ends with `[bot]` (CI tools, automation)
-- Comments that were posted by this skill in a previous iteration — they start with `Fixed:`, `Addressed:`, or `Resolved:` and are authored by the authenticated user running `gh`
+- Comments that are themselves resolution acknowledgements — they start with `Fixed:`, `Addressed:`, or `Resolved:` and are authored by the authenticated user running `gh`
 
-Do **not** filter out comments based on their content alone (e.g. a comment containing the word "resolved" is still actionable — it's describing the expected fix, not acknowledging one). Only skip a comment if a subsequent reply in the flat list looks like it was posted by this skill (prefix match on `Fixed:` / `Addressed:`).
+Do **not** filter out comments based on their content alone (e.g. a comment containing the word "resolved" is still actionable — it's describing the expected fix, not acknowledging one).
 
-Comments from the repo owner or PR author are always actionable — include them.
+Comments from the repo owner or PR author are always included.
 
 ## Step 5 — Present Summary Before Acting
 
 Before changing any code, show the user what was found:
 
 ```
-Found 3 active review thread(s) (1 outdated) and 2 general comment(s):
+Found 3 active review thread(s) and 2 general comment(s):
 
 Inline threads:
   1. [src/auth/middleware.ts:47] "Extract this into a helper — it's used in three places" (alice)
-  2. [tests/order.test.ts:92] "This test doesn't cover the null input case" (bob)  [OUTDATED — line moved/removed]
+  2. [tests/order.test.ts:92] "This test doesn't cover the null input case" (bob)
   3. [README.md:12] "Broken link in the installation section" (carol)
 
 General comments:
   1. "Error messages throughout are too generic, users can't tell what went wrong" (alice)
   2. "Missing migration script for the new column" (bob)
 ```
-
-Label any thread whose `isOutdated` is `true` with `[OUTDATED — line moved/removed]` so the user understands the context when reviewing fixes.
 
 ## Step 5b — Recommend an Addressing Mode and Ask the User
 
@@ -149,6 +152,8 @@ Score the work across these signals:
 | All comments are in 1–2 files and self-contained | −2 |
 
 **Score ≥ 3 → recommend Plan. Score < 3 → recommend Address on the fly.**
+
+Note the skipped comment counts (resolved, outdated, pending) in the summary so the user knows how many threads were filtered out.
 
 ### Write the Recommendation
 
@@ -175,7 +180,7 @@ Check whether `planning:make` is available by scanning the skills list in the cu
 
 Follow the `planning:make` skill instructions with this task description, which carries the full context gathered in Steps 1–4 so the skill can skip its discovery phase and start directly with the interactive questions:
 
-> Address PR #NUMBER review comments — X inline thread(s) (N outdated) and Y general comment(s) across the following files: [list]. Key changes needed: [one-line summary per comment]. **After applying all fixes, list the changed files so the user can review, commit, and push manually.**
+> Address PR #NUMBER review comments — X inline thread(s) and Y general comment(s) across the following files: [list]. Key changes needed: [one-line summary per comment]. **After applying all fixes, list the changed files so the user can review, commit, and push manually.**
 
 `planning:make` will ask the user what to do after the plan is created (review, implement, done). **Stop here — do not proceed to Step 6.**
 
@@ -204,8 +209,6 @@ Process each active comment in order. For each:
 3. Determine the minimal correct fix
 4. Apply the fix using `Edit` (for targeted changes) or `Write` (for new files)
 5. Record a one-sentence description of what was changed for the final summary in Step 7
-
-**For outdated inline threads** (`isOutdated: true`): the original line no longer exists in the current diff. Read the full `path` file to find the best matching location (same function, same logic block, or the nearest equivalent). Apply the fix there. If no matching location exists (code was deleted), note in the summary that the code was removed and the comment no longer applies.
 
 Group related comments that touch the same file or function — handle them together to avoid conflicting edits.
 

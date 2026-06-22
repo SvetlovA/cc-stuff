@@ -66,12 +66,14 @@ If no PR is detected, the skill lists open PRs and prompts you to select one.
 
 ## What counts as an "active" comment?
 
+The skill includes only **submitted, unresolved, current** inline threads and general PR comments.
+
 The skill skips:
 - Threads marked as **resolved** in GitHub's UI (`isResolved: true`)
 - Threads where the **last reply** already indicates resolution (contains "fixed", "done", "resolved", "LGTM", etc.)
+- Threads on lines that no longer exist in the current diff (`isOutdated: true`) — applying fixes to stale positions can produce incorrect edits
+- Threads where every comment belongs to a **pending (unsubmitted) review** — draft comments not yet visible to other reviewers
 - Comments by **bots** (e.g. CI tools, Dependabot)
-
-**Outdated threads are included.** When a comment was left on a line that no longer exists in the current diff (`isOutdated: true`), the skill labels it in the summary and finds the best matching location in the file to apply the fix. If no equivalent location exists (code was deleted), it posts a reply explaining the outcome.
 
 Everything else is treated as actionable feedback.
 
