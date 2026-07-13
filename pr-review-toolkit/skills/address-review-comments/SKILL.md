@@ -3,7 +3,7 @@ name: Address Review Comments
 description: This skill should be used when the user asks to "address review comments", "fix PR comments", "resolve review feedback", "apply code review suggestions", "address PR feedback", "work through review comments", "go through PR reviews", "address my own PR comments", "self-review PR", or wants to systematically process GitHub pull request review comments (including comments left by themselves) and apply the suggested code fixes.
 argument-hint: "[pr-number]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
-version: 0.5.0
+version: 0.6.0
 ---
 
 # Address Review Comments
@@ -51,7 +51,7 @@ Use these as `OWNER` and `REPO` throughout the rest of the workflow.
 
 ## Step 3 — Fetch Active Inline Review Threads
 
-Use the GraphQL API to retrieve review threads with their resolution and outdated status. The REST API does not expose `isResolved` or `isOutdated` — GraphQL is required here.
+Use the GraphQL API to retrieve review threads. The REST API does not expose `isResolved` or `isOutdated` — GraphQL is required here. Each comment node must include `pullRequestReview { state }` to detect pending (unsubmitted) reviews.
 
 ```bash
 gh api graphql -f query='
@@ -73,6 +73,7 @@ gh api graphql -f query='
               originalLine
               author { login }
               createdAt
+              pullRequestReview { state }
             }
           }
         }
@@ -82,16 +83,19 @@ gh api graphql -f query='
 }'
 ```
 
-**Core inclusion principle:** every unresolved thread whose feedback is still relevant is actionable — no matter where it is anchored or how it is phrased. The only questions are (a) has it already been resolved, and (b) *where* does the fix go. Whether a comment is on-diff or off-diff, specific or general, never decides *whether* it is addressed.
+**Core inclusion principle:** every unresolved, submitted thread whose feedback is still relevant is actionable — no matter where it is anchored or how it is phrased. The only questions are (a) has it already been resolved, and (b) *where* does the fix go. Whether a comment is on-diff or off-diff, specific or general, never decides *whether* it is addressed.
 
-**Keep a thread when BOTH are true:**
+**Keep a thread when ALL of these are true:**
 - `isResolved` is `false`
+- At least one comment has `pullRequestReview.state` other than `PENDING` (the thread comes from a *submitted* review)
 - The thread does NOT already have a resolution reply (see detection rules below)
 
 **Never drop a thread for any of these reasons — each one is still actionable:**
 - **`isOutdated` is `true`.** The comment is anchored to a line/hunk that changed under it, so the *anchor* is stale — but the *feedback* is not. A stale anchor only changes where the fix lands (Step 6), never whether the comment is handled.
 - **The comment targets code the PR did not change.** A review left on existing, unchanged code (or on a file untouched by this diff) is still real feedback about the current state of the codebase. Address it.
 - **The comment is general or high-level** rather than a specific line edit — e.g. "this skill should support any input and fall back when a parameter is missing." General direction is actionable: treat it as the umbrella that more specific comments fall under, and apply it. If specific comments are concrete instances of a general one, handling the specifics satisfies the general comment too — note that in the summary.
+
+**Skip a thread only when every comment's `pullRequestReview.state` is `PENDING`** — those are unsubmitted draft comments not yet visible to other reviewers, so they are not yet final feedback. (Submitted states: `COMMENTED`, `APPROVED`, `CHANGES_REQUESTED`, `DISMISSED`.)
 
 Track each thread's `isOutdated` value so Step 5 can label it and Step 6 can locate the best matching code position. `isOutdated: true` affects *where* the fix goes, never *whether* the comment is addressed.
 
@@ -114,9 +118,9 @@ gh api repos/OWNER/REPO/issues/PR_NUMBER/comments --paginate
 
 General comments arrive as a flat chronological list — there is no threading. Filter out:
 - Comments where `user.login` ends with `[bot]` (CI tools, automation)
-- Comments that were posted by this skill in a previous iteration — they start with `Fixed:`, `Addressed:`, or `Resolved:` and are authored by the authenticated user running `gh`
+- Comments that are themselves resolution acknowledgements — they start with `Fixed:`, `Addressed:`, or `Resolved:` and are authored by the authenticated user running `gh`
 
-Do **not** filter out comments based on their content alone (e.g. a comment containing the word "resolved" is still actionable — it's describing the expected fix, not acknowledging one). Only skip a comment if a subsequent reply in the flat list looks like it was posted by this skill (prefix match on `Fixed:` / `Addressed:`).
+Do **not** filter out comments based on their content alone (e.g. a comment containing the word "resolved" is still actionable — it's describing the expected fix, not acknowledging one).
 
 Comments from the repo owner or PR author are always actionable — include them. General observations about the codebase's overall behavior or about code this PR did not touch are actionable too — they describe the current state and are addressed the same as any other comment.
 
@@ -137,7 +141,7 @@ General comments:
   2. "Missing migration script for the new column" (bob)
 ```
 
-Label any thread whose `isOutdated` is `true` with `[OUTDATED — line moved/removed]` so the user understands the context when reviewing fixes.
+Label any thread whose `isOutdated` is `true` with `[OUTDATED — line moved/removed]` so the user understands the fix will be applied at the nearest matching location rather than skipped.
 
 ## Step 5b — Recommend an Addressing Mode and Ask the User
 
@@ -156,6 +160,8 @@ Score the work across these signals:
 | All comments are in 1–2 files and self-contained | −2 |
 
 **Score ≥ 3 → recommend Plan. Score < 3 → recommend Address on the fly.**
+
+Note the skipped comment counts (resolved, pending draft) in the summary so the user knows how many threads were filtered out. Outdated threads are not skipped — they are included and labeled.
 
 ### Write the Recommendation
 

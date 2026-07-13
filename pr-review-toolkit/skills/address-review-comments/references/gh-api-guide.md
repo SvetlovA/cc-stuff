@@ -34,6 +34,7 @@ query GetReviewThreads($owner: String!, $repo: String!, $prNumber: Int!, $cursor
               author { login }
               createdAt
               updatedAt
+              pullRequestReview { state }
               reactions(first: 5) {
                 nodes { content }
               }
@@ -133,7 +134,17 @@ gh api repos/OWNER/REPO/pulls/PR_NUMBER/comments \
   -F in_reply_to=ORIGINAL_COMMENT_ID
 ```
 
-## Resolution Detection Algorithm
+## Thread Filtering Algorithm
+
+A thread is included in the active set when **all** of the following are true:
+
+1. **`isResolved` is `false`** — threads resolved in the GitHub UI are skipped entirely.
+2. **At least one comment has a submitted review state** — check `pullRequestReview.state` on every comment in the thread. Skip the thread if every comment's state is `PENDING` (unsubmitted draft review not yet visible to other reviewers). Valid submitted states: `COMMENTED`, `APPROVED`, `CHANGES_REQUESTED`, `DISMISSED`.
+3. **No resolution reply exists** — see the resolution detection rule below.
+
+**`isOutdated` is NOT a filter.** Outdated threads are anchored to a line/hunk that changed under them, but the feedback is still valid — include them. `isOutdated: true` only affects *where* the fix is applied (find the nearest matching location in the file), never *whether* the thread is addressed. The same holds for comments on code the PR did not change and for general/high-level comments: all are actionable.
+
+### Resolution Detection
 
 A thread is considered already handled when **all three** conditions are true:
 
@@ -149,11 +160,25 @@ RESOLUTION_SIGNALS = [
     "no action needed"
 ]
 
-def thread_is_already_handled(comments: list) -> bool:
-    if len(comments) <= 1:
-        return False  # Single comment = original review, always actionable
-    last = comments[-1]["body"].lower().strip()
-    return any(signal in last for signal in RESOLUTION_SIGNALS)
+def thread_is_active(thread: dict) -> bool:
+    if thread["isResolved"]:
+        return False
+    # NOTE: isOutdated is intentionally NOT a filter — outdated feedback is
+    # still valid; it only changes where the fix lands, not whether it applies.
+    comments = thread["comments"]["nodes"]
+    # Skip if every comment is from a pending (unsubmitted) review
+    all_pending = all(
+        c.get("pullRequestReview", {}).get("state") == "PENDING"
+        for c in comments
+    )
+    if all_pending:
+        return False
+    # Skip if a resolution reply already exists
+    if len(comments) > 1:
+        last = comments[-1]["body"].lower().strip()
+        if any(signal in last for signal in RESOLUTION_SIGNALS):
+            return False
+    return True
 ```
 
 **Self-review note:** In the iterative self-review workflow, the same person authors both the original comment and any replies. Do not require `last_author != first_author` as a condition — the repo owner may write a comment and later reply to it themselves after fixing it. The presence of a reply with resolution signals is sufficient.
@@ -187,7 +212,8 @@ def thread_is_already_handled(comments: list) -> bool:
                     "originalLine": 84,
                     "diffHunk": "@@ -81,7 +81,12 @@\n ...",
                     "author": { "login": "alice" },
-                    "createdAt": "2024-01-15T10:30:00Z"
+                    "createdAt": "2024-01-15T10:30:00Z",
+                    "pullRequestReview": { "state": "CHANGES_REQUESTED" }
                   }
                 ]
               }
@@ -198,6 +224,24 @@ def thread_is_already_handled(comments: list) -> bool:
               "isOutdated": false,
               "resolvedBy": { "login": "bob" },
               "comments": { "nodes": [...] }
+            },
+            {
+              "id": "PRRT_kwDOBp5T2M5DxZcd",
+              "isResolved": false,
+              "isOutdated": true,
+              "resolvedBy": null,
+              "comments": { "nodes": [...] }
+            },
+            {
+              "id": "PRRT_kwDOBp5T2M5EyWef",
+              "isResolved": false,
+              "isOutdated": false,
+              "resolvedBy": null,
+              "comments": {
+                "nodes": [{
+                  "pullRequestReview": { "state": "PENDING" }
+                }]
+              }
             }
           ]
         }
@@ -207,7 +251,10 @@ def thread_is_already_handled(comments: list) -> bool:
 }
 ```
 
-The second thread (`isResolved: true`) is skipped in the filtering step.
+- First thread (`isResolved: false`, submitted) — **included**: active.
+- Second thread (`isResolved: true`) — skipped: resolved.
+- Third thread (`isOutdated: true`) — **included**: outdated anchor, but the feedback is still valid; the fix is applied at the nearest matching location.
+- Fourth thread (all comments `PENDING`) — skipped: unsubmitted draft review.
 
 ## Handling the `diffHunk` Field
 

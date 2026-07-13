@@ -9,7 +9,7 @@ A Claude Code plugin for working through GitHub pull request reviews. Fetch acti
 Systematically addresses all active review comments on a pull request:
 
 1. **Detects the current PR** (or lets you select one from a list)
-2. **Fetches all active comments** — inline review threads and general PR comments, filtering out only already-resolved and already-replied-to threads. Every other unresolved comment is treated as actionable: outdated threads, comments on code this PR did not change, and general/high-level comments are all **included** (outdated threads are labeled so the fix can be applied at the nearest equivalent location)
+2. **Fetches all active comments** — inline review threads and general PR comments, filtering out only already-resolved threads, already-replied-to threads, and pending (unsubmitted) draft reviews. Every other unresolved comment is treated as actionable: outdated threads, comments on code this PR did not change, and general/high-level comments are all **included** (outdated threads are labeled so the fix can be applied at the nearest equivalent location)
 3. **Presents a summary** of all active threads and evaluates scope
 4. **Recommends a mode** and asks how to proceed:
    - **Address on the fly** — apply each fix immediately, resolve/reply to threads, then prompt to commit (recommended for ≤ 5 comments in 1–2 files)
@@ -66,9 +66,12 @@ If no PR is detected, the skill lists open PRs and prompts you to select one.
 
 ## What counts as an "active" comment?
 
-The skill skips:
+The skill includes every **submitted, unresolved** thread and general PR comment whose feedback is still relevant.
+
+The skill skips only:
 - Threads marked as **resolved** in GitHub's UI (`isResolved: true`)
 - Threads where the **last reply** already indicates resolution (contains "fixed", "done", "resolved", "LGTM", etc.)
+- Threads where every comment belongs to a **pending (unsubmitted) review** — draft comments not yet visible to other reviewers
 - Comments by **bots** (e.g. CI tools, Dependabot)
 
 Everything else is treated as actionable feedback — including:
