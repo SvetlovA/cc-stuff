@@ -9,7 +9,7 @@ A Claude Code plugin for working through GitHub pull request reviews. Fetch acti
 Systematically addresses all active review comments on a pull request:
 
 1. **Detects the current PR** (or lets you select one from a list)
-2. **Fetches all active comments** — inline review threads and general PR comments, filtering out already-resolved and already-replied-to threads; outdated threads (comments on lines that no longer exist in the current diff) are **included** and labeled so the fix can be applied at the nearest equivalent location
+2. **Fetches all active comments** — inline review threads and general PR comments, filtering out only already-resolved and already-replied-to threads. Every other unresolved comment is treated as actionable: outdated threads, comments on code this PR did not change, and general/high-level comments are all **included** (outdated threads are labeled so the fix can be applied at the nearest equivalent location)
 3. **Presents a summary** of all active threads and evaluates scope
 4. **Recommends a mode** and asks how to proceed:
    - **Address on the fly** — apply each fix immediately, resolve/reply to threads, then prompt to commit (recommended for ≤ 5 comments in 1–2 files)
@@ -71,9 +71,13 @@ The skill skips:
 - Threads where the **last reply** already indicates resolution (contains "fixed", "done", "resolved", "LGTM", etc.)
 - Comments by **bots** (e.g. CI tools, Dependabot)
 
-**Outdated threads are included.** When a comment was left on a line that no longer exists in the current diff (`isOutdated: true`), the skill labels it in the summary and finds the best matching location in the file to apply the fix. If no equivalent location exists (code was deleted), it posts a reply explaining the outcome.
+Everything else is treated as actionable feedback — including:
 
-Everything else is treated as actionable feedback.
+- **Outdated threads** (`isOutdated: true`). The comment is anchored to a line that changed under it, but the feedback is still valid. The skill labels it in the summary and finds the best matching location in the file to apply the fix. If no equivalent location exists (code was deleted), it posts a reply explaining the outcome.
+- **Comments on code this PR did not change** — feedback about existing or unchanged code is still real and gets addressed.
+- **General or high-level comments** (e.g. "support any input and fall back when a parameter is missing"). These are applied across every place they imply a change, and act as the umbrella that more specific comments fall under.
+
+A comment is never skipped just because its anchor is stale, its target wasn't part of the diff, or it's phrased generally.
 
 ## Permissions
 

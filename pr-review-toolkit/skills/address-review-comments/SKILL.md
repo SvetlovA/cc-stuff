@@ -3,7 +3,7 @@ name: Address Review Comments
 description: This skill should be used when the user asks to "address review comments", "fix PR comments", "resolve review feedback", "apply code review suggestions", "address PR feedback", "work through review comments", "go through PR reviews", "address my own PR comments", "self-review PR", or wants to systematically process GitHub pull request review comments (including comments left by themselves) and apply the suggested code fixes.
 argument-hint: "[pr-number]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
-version: 0.4.0
+version: 0.5.0
 ---
 
 # Address Review Comments
@@ -82,11 +82,18 @@ gh api graphql -f query='
 }'
 ```
 
-**Keep only threads where:**
-- `isResolved` is `false`
-- The thread does NOT already have a resolution reply
+**Core inclusion principle:** every unresolved thread whose feedback is still relevant is actionable — no matter where it is anchored or how it is phrased. The only questions are (a) has it already been resolved, and (b) *where* does the fix go. Whether a comment is on-diff or off-diff, specific or general, never decides *whether* it is addressed.
 
-Include threads where `isOutdated` is `true` — a comment on a line that no longer exists in the current diff is still actionable feedback. Track each thread's `isOutdated` value so Step 5 can label them and Step 6 can locate the best matching code position.
+**Keep a thread when BOTH are true:**
+- `isResolved` is `false`
+- The thread does NOT already have a resolution reply (see detection rules below)
+
+**Never drop a thread for any of these reasons — each one is still actionable:**
+- **`isOutdated` is `true`.** The comment is anchored to a line/hunk that changed under it, so the *anchor* is stale — but the *feedback* is not. A stale anchor only changes where the fix lands (Step 6), never whether the comment is handled.
+- **The comment targets code the PR did not change.** A review left on existing, unchanged code (or on a file untouched by this diff) is still real feedback about the current state of the codebase. Address it.
+- **The comment is general or high-level** rather than a specific line edit — e.g. "this skill should support any input and fall back when a parameter is missing." General direction is actionable: treat it as the umbrella that more specific comments fall under, and apply it. If specific comments are concrete instances of a general one, handling the specifics satisfies the general comment too — note that in the summary.
+
+Track each thread's `isOutdated` value so Step 5 can label it and Step 6 can locate the best matching code position. `isOutdated: true` affects *where* the fix goes, never *whether* the comment is addressed.
 
 **Resolution reply detection — requires ALL of:**
 1. The thread has **more than one comment** (at least one reply exists). Single-comment threads are always active — a review comment like "This should be fixed by extracting a helper" contains the word "fixed" but is clearly the original feedback, not a resolution.
@@ -111,7 +118,7 @@ General comments arrive as a flat chronological list — there is no threading. 
 
 Do **not** filter out comments based on their content alone (e.g. a comment containing the word "resolved" is still actionable — it's describing the expected fix, not acknowledging one). Only skip a comment if a subsequent reply in the flat list looks like it was posted by this skill (prefix match on `Fixed:` / `Addressed:`).
 
-Comments from the repo owner or PR author are always actionable — include them.
+Comments from the repo owner or PR author are always actionable — include them. General observations about the codebase's overall behavior or about code this PR did not touch are actionable too — they describe the current state and are addressed the same as any other comment.
 
 ## Step 5 — Present Summary Before Acting
 
@@ -205,7 +212,9 @@ Process each active comment in order. For each:
 4. Apply the fix using `Edit` (for targeted changes) or `Write` (for new files)
 5. Record a one-sentence description of what was changed for the final summary in Step 7
 
-**For outdated inline threads** (`isOutdated: true`): the original line no longer exists in the current diff. Read the full `path` file to find the best matching location (same function, same logic block, or the nearest equivalent). Apply the fix there. If no matching location exists (code was deleted), note in the summary that the code was removed and the comment no longer applies.
+**For outdated inline threads** (`isOutdated: true`) **or comments on code the PR did not change**: the `line` anchor may not point at the relevant code in the current file. Read the full `path` file to find the best matching location (same function, same logic block, or the nearest equivalent) and apply the fix there. If no matching location exists (code was deleted), note in the summary that the code was removed and the comment no longer applies.
+
+**For general or high-level comments** (no specific line, or feedback about overall behavior): identify every place in the codebase the comment implies a change and apply it across all of them. When more specific comments are concrete instances of the general one, fixing the specifics covers the general comment — record that linkage in the summary rather than skipping it.
 
 Group related comments that touch the same file or function — handle them together to avoid conflicting edits.
 
