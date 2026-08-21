@@ -1,9 +1,9 @@
 ---
-name: Address Review Comments
+name: address-review-comments
 description: This skill should be used when the user asks to "address review comments", "fix PR comments", "resolve review feedback", "apply code review suggestions", "address PR feedback", "work through review comments", "go through PR reviews", "address my own PR comments", "self-review PR", or wants to systematically process GitHub pull request review comments (including comments left by themselves) and apply the suggested code fixes.
 argument-hint: "[pr-number]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
-version: 0.6.0
+version: 0.6.1
 ---
 
 # Address Review Comments
