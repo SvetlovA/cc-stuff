@@ -6,7 +6,7 @@ A public collection of Claude Code plugins for developer workflows. Install any 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.6.0 |
+| [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.6.1 |
 
 ## Installing a Plugin
 
