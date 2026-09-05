@@ -92,7 +92,16 @@ python "$P" resume --session 20260905-185718     # bring an archived one back
 
 Four settings define a new partner: **provider**, **model**, **effort**, and **auto** level. Take whatever the user supplied and only ask about the rest.
 
-Check `python "$P" providers` before offering options — recommending an uninstalled CLI wastes a round trip. If anything is unset, ask with `AskUserQuestion`, installed providers first. When the user says "just pick": choose a provider *different from your own model* — same-model agents tend to agree with you — and medium or high effort.
+```bash
+python "$P" providers                # which CLIs are installed at all
+python "$P" models                   # what to point them at, and the effort that suits each
+```
+
+`models` is the one to read before offering anything. It prints the curated list **and** the model ids this machine actually mentions — from the CLI's own help and the user's provider config — because a list baked into the script always lags the providers. Anything under "also mentioned on this machine" is real enough to offer; it just needs `--force`, since appearing in a config file is not proof it exists.
+
+**Never pick the model silently.** Put the options to the user with `AskUserQuestion` — installed providers first, each with the effort `models` recommends and its one-line character note. A partner the user did not choose is one they will not believe when it disagrees with them, which is the entire point of running it. Ask even when they supplied the provider, unless they also named the model.
+
+When they genuinely say "just pick": take the entry marked as the default, and a provider *different from your own model* — same-model agents tend to agree with you. Say which you chose and why, so they can correct it.
 
 Validate before spawning: `python "$P" check --provider codex --model gpt-5-codex --effort high`. `spawn` runs the same checks and refuses rather than opening a doomed tab, but `check` first lets you fix it in conversation. Each problem comes back with the command that fixes it — relay it verbatim. An unknown model is the one soft failure: offer `--force` rather than arguing.
 
@@ -167,6 +176,7 @@ Skip the loop only for mechanical lookups. Anything involving a design choice, a
 
 ```bash
 python "$P" providers                       # what is installed, models, efforts, where tabs open
+python "$P" models [--provider X] [--no-probe]  # curated + detected models, recommended effort
 python "$P" check --provider X [--model M] [--effort E] [--force]
 python "$P" list                            # everyone here + who holds the baton
 python "$P" state                           # who is ALIVE + what to do next

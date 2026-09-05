@@ -378,23 +378,38 @@ def cmd_wait(args) -> int:
     sd = state_dir()
     who = args.who or me_id(load_roster(sd))
     deadline = time.time() + args.timeout
-    while True:
-        touch_seen(sd, who)          # still here, still listening
-        msgs = read_new(sd, who)
-        if msgs:
-            roster = load_roster(sd)
-            if args.json:
-                print(json.dumps({"baton": baton_of(roster), "you": who,
-                                  "messages": msgs}, indent=2))
-            else:
-                print(baton_banner(roster, who) + NL * 2 + render(msgs))
-            return 0
-        if time.time() >= deadline:
-            emit(args, {"messages": []},
-                 f"(nothing addressed to {who} in {args.timeout}s "
-                 f"-- run wait again to keep listening)")
-            return 0
-        time.sleep(args.poll)
+    # Hold <id>/waiting for as long as we poll, stamped with our own deadline.
+    # This is what lets the Stop hook tell "listening right now" from "ran some
+    # command recently" -- every other command touches lastseen too.
+    mark = sd / who / "waiting"
+    try:
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.write_text(str(deadline), encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        while True:
+            touch_seen(sd, who)          # still here, still listening
+            msgs = read_new(sd, who)
+            if msgs:
+                roster = load_roster(sd)
+                if args.json:
+                    print(json.dumps({"baton": baton_of(roster), "you": who,
+                                      "messages": msgs}, indent=2))
+                else:
+                    print(baton_banner(roster, who) + NL * 2 + render(msgs))
+                return 0
+            if time.time() >= deadline:
+                emit(args, {"messages": []},
+                     f"(nothing addressed to {who} in {args.timeout}s "
+                     f"-- run wait again to keep listening)")
+                return 0
+            time.sleep(args.poll)
+    finally:
+        try:
+            mark.unlink()
+        except OSError:
+            pass
 
 
 def cmd_claim(args) -> int:
@@ -423,7 +438,9 @@ def cmd_claim(args) -> int:
     append_msg(sd, "system", "@all",
                f"**{who}** was given an instruction directly by the human and has "
                f"taken the write baton from **{prev}**. {who} edits files from now "
-               f"on; everyone else advises until the human turns to them.", who)
+               f"on; everyone else advises until the human turns to them. "
+               f"**{prev}**: you are an advisor again -- go back to `wait` so you "
+               f"hear what follows.", who)
     emit(args, {"baton": who, "previous": prev, "changed": True},
          f"baton: {prev} -> {who} (you may edit now)")
     return 0
@@ -488,26 +505,115 @@ def _gemini_tui(c: dict) -> list[str]:
     return argv + ["-i", c["prompt"]]
 
 
+# A starting point for the human's choice, not a substitute for it. Any list
+# baked into a script lags the providers by however long since it was edited, so
+# every entry carries the effort that actually suits that model and one line on
+# what it is like to argue with -- and `models` prints it next to whatever the
+# machine itself turns out to mention. `--force` accepts anything not here.
+CATALOG: dict[str, list[dict]] = {
+    "claude": [
+        {"id": "claude-opus-5", "effort": "high",
+         "note": "deepest reasoning; the strongest challenger, and the slowest"},
+        {"id": "claude-sonnet-5", "effort": "high", "default": True,
+         "note": "best all-round partner -- fast enough to argue in real time"},
+        {"id": "claude-haiku-4-5-20251001", "effort": "low",
+         "note": "quick and cheap; concedes too easily to be a good opponent"},
+    ],
+    "codex": [
+        {"id": "gpt-5-codex", "effort": "high", "default": True,
+         "note": "code-focused; the usual pick facing a Claude session"},
+        {"id": "gpt-5", "effort": "high",
+         "note": "general reasoning; better on design questions than on diffs"},
+    ],
+    "gemini": [
+        {"id": "gemini-2.5-pro", "effort": "high", "default": True,
+         "note": "strongest Gemini; a useful third voice in a deadlock"},
+        {"id": "gemini-2.5-flash", "effort": "low",
+         "note": "fast and cheap; thin on hard reasoning"},
+    ],
+}
+
 PROVIDERS: dict[str, dict] = {
     "claude": {"bin": "claude", "tui": _claude_tui, "effort": "prompt",
                "efforts": set(EFFORT_HINT),
-               "models": ["claude-opus-5", "claude-sonnet-5",
-                          "claude-haiku-4-5-20251001"],
+               "models": [m["id"] for m in CATALOG["claude"]],
                "install": "npm install -g @anthropic-ai/claude-code",
                "login": "claude  (then /login)"},
     "codex": {"bin": "codex", "tui": _codex_tui, "effort": "flag",
               # A real flag, so only the values the API accepts work here.
               # "max" is ours, not OpenAI's -- it maps onto "high".
               "efforts": {"low", "medium", "high"},
-              "models": ["gpt-5-codex", "gpt-5"],
+              "models": [m["id"] for m in CATALOG["codex"]],
               "install": "npm install -g @openai/codex",
               "login": "codex login"},
     "gemini": {"bin": "gemini", "tui": _gemini_tui, "effort": "prompt",
                "efforts": set(EFFORT_HINT),
-               "models": ["gemini-2.5-pro", "gemini-2.5-flash"],
+               "models": [m["id"] for m in CATALOG["gemini"]],
                "install": "npm install -g @google/gemini-cli",
                "login": "gemini  (then follow the browser prompt)"},
 }
+
+# Neither claude, codex nor gemini has a stable "list models" command, so
+# discovery reads what is on the machine rather than asking: the CLI's own help
+# text, and whatever the user has already configured for it.
+MODEL_RE: dict[str, re.Pattern] = {
+    "claude": re.compile(r"claude-[a-z0-9][a-z0-9.\-]{3,}", re.I),
+    "codex": re.compile(r"\bgpt-[0-9][a-z0-9.\-]*", re.I),
+    "gemini": re.compile(r"\bgemini-[0-9][a-z0-9.\-]*", re.I),
+}
+
+# Second segments that mean "tooling named after the provider", not a model.
+NON_MODEL_SEGMENTS = {"code", "desktop", "plugins", "statusline", "setup",
+                      "cli", "agent", "md", "config", "settings"}
+
+CONFIG_HINTS: dict[str, list[str]] = {
+    "claude": ["~/.claude/settings.json", "~/.claude.json"],
+    "codex": ["~/.codex/config.toml"],
+    "gemini": ["~/.gemini/settings.json"],
+}
+
+
+def discover_models(provider: str, timeout: int = 20) -> list[str]:
+    """Model ids this machine mentions, whether or not the catalog knows them.
+
+    A hint for the human to choose from, never an authority: an id found here
+    still fails `validate` without `--force`, because "the string appears in a
+    help page" is not evidence the model exists.
+    """
+    pat, spec = MODEL_RE.get(provider), PROVIDERS.get(provider)
+    if not pat or not spec:
+        return []
+    blobs = []
+    if spec["bin"] and _has(spec["bin"]):
+        try:
+            r = subprocess.run([spec["bin"], "--help"], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               timeout=timeout)
+            blobs.append((r.stdout or "") + (r.stderr or ""))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    for hint in CONFIG_HINTS.get(provider, []):
+        f = Path(hint).expanduser()
+        try:
+            if f.is_file() and f.stat().st_size < 2_000_000:
+                blobs.append(f.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    found = set()
+    for b in blobs:
+        for m in pat.finditer(b):
+            hit = m.group(0).lower().strip(".,;:)\"'")
+            hit = re.sub(r"\.(cmd|sh|ps1|exe|json|md|ya?ml|toml)$", "", hit)
+            segs = hit.split("-")[1:]
+            # A model id carries a version somewhere. Without that rule the
+            # config files hand back every plugin and script that happens to
+            # start with the provider's name -- claude-code-setup, claude-desktop.
+            if not any(any(c.isdigit() for c in s) for s in segs):
+                continue
+            if segs and segs[0] in NON_MODEL_SEGMENTS:
+                continue
+            found.add(hit)
+    return sorted(found)
 
 
 def cli_runs(binary: str) -> bool:
@@ -892,13 +998,19 @@ that stops looping is dead to the others.
 
 5. System message saying you were stopped: say goodbye, exit the loop.
 
+**Whatever happened, you end at step 1.** A discussion reaching its conclusion
+is not an exit -- neither is the baton moving to somebody else. Those are the
+two moments an agent is most tempted to call it done, and they are exactly when
+the group is about to say the thing you need to hear. Losing the baton demotes
+you to advisor; it does not excuse you from listening.
+
 Unsure what was already said? `{run} read` or open the transcript before you
 reply -- never from stale memory. You never receive your own messages, so you
 cannot answer yourself.
 
-A Stop hook holds you here: if you try to end a turn with a message to you or
-`@all` still unanswered, it sends you back to `read` and `send`. Answer, and it
-lets you go.
+A Stop hook holds you to both halves of that: it blocks the turn from ending
+while a message to you or `@all` is unanswered, and again if no `wait` is in
+flight for you. Answer, go back to `wait`, and it lets you go.
 """
 
 LOOP_SESSION = """
@@ -940,9 +1052,15 @@ Every turn:
 4. END of every turn, always: start one `{run} wait --timeout 600` as a
    background command, then end your turn. When it returns, go to step 1.
 
-Stop only on a system message saying you were stopped. If you try to end a turn
-with a message to you or `@all` unanswered, a Stop hook sends you back to step 1
--- answer it, then re-arm the background `wait` as usual.
+Step 4 is not optional and has no exceptions. A discussion reaching its
+conclusion is not an exit, and neither is the baton moving to somebody else --
+those are the two moments you are most tempted to call it done, and exactly when
+the group is about to say the thing you need to hear. Losing the baton demotes
+you to advisor; it does not excuse you from listening.
+
+Stop only on a system message saying you were stopped. A Stop hook holds you to
+both halves of this: it blocks the turn from ending while a message to you or
+`@all` is unanswered, and again if no `wait` is in flight for you.
 """
 
 
@@ -1383,6 +1501,32 @@ def _nag_throttled(marker: Path, window: int) -> bool:
     return False
 
 
+def is_listening(sd: Path, roster: dict, who: str) -> bool:
+    """Is a `wait` actually in flight for this agent right now?
+
+    `wait` holds <id>/waiting for as long as it polls, stamped with its own
+    deadline, so this answers "listening" rather than "did something recently"
+    -- which `send`, `read` and `claim` would all satisfy just as well. That
+    distinction is the whole point: an agent that has just replied and is about
+    to stop looks busy by every other measure.
+    """
+    mark = sd / who / "waiting"
+    try:
+        if mark.exists() and time.time() < float(
+                mark.read_text(encoding="utf-8").strip()) + 30:
+            return True
+    except (OSError, ValueError):
+        pass
+    # The session agent backgrounds its `wait`, so the marker write can race a
+    # Stop that fires immediately after. A lastseen inside the live window still
+    # proves something is polling on its behalf.
+    entry = roster["partners"].get(who) or {}
+    if (entry.get("kind") or "tab") == "session":
+        age = _age_seconds(last_seen(sd, who))
+        return age is not None and age <= LIVE_WINDOW
+    return False
+
+
 def last_seen(sd: Path, pid: str) -> str | None:
     f = sd / pid / "lastseen"
     if not f.exists():
@@ -1607,7 +1751,9 @@ def cmd_baton(args) -> int:
     save_roster(sd, roster)
     append_msg(sd, "system", "@all",
                f"Write baton moved from **{prev}** to **{args.to}**. "
-               f"{args.to} edits files from now on; everyone else advises.", args.to)
+               f"{args.to} edits files from now on; everyone else advises. "
+               f"**{prev}**: you are an advisor again -- go back to `wait` so you "
+               f"hear what follows.", args.to)
     emit(args, {"baton": args.to, "previous": prev}, f"baton: {prev} -> {args.to}")
     return 0
 
@@ -1660,6 +1806,57 @@ def cmd_providers(args) -> int:
             print(f"           {'':15} install with: {r['install']}")
     where = "Orca tab" if orca_bin() else "a new terminal tab"
     print(f"{NL}Partners will open in {where}.")
+    print("Run `models` for what to point each one at, and what effort suits it.")
+    return 0
+
+
+def cmd_models(args) -> int:
+    """What each provider can be pointed at, and what to pick -- for the human.
+
+    Recommending is this command's job; deciding is not. A partner is only worth
+    having if it is a model the human trusts to disagree with them, so the point
+    is to put real options in front of them rather than quietly defaulting to
+    whatever a list in this file happened to say when it was written.
+    """
+    provs = [args.provider] if args.provider else list(PROVIDERS)
+    out = []
+    for name in provs:
+        spec = PROVIDERS.get(name)
+        if not spec:
+            emit(args, {"error": "unknown"},
+                 f"unknown provider '{name}'; known: {', '.join(PROVIDERS)}")
+            return 1
+        curated = CATALOG.get(name, [])
+        known = {m["id"] for m in curated}
+        installed = _has(spec["bin"])
+        detected = [] if (args.no_probe or not installed) else \
+            [m for m in discover_models(name) if m not in known]
+        out.append({"provider": name, "installed": installed,
+                    "efforts": sorted(spec["efforts"]),
+                    "effort_kind": "native flag" if spec["effort"] == "flag"
+                    else "prompt hint",
+                    "curated": curated, "detected": detected})
+    if args.json:
+        print(json.dumps({"providers": out}, indent=2))
+        return 0
+
+    for p in out:
+        state = "" if p["installed"] else "   (NOT installed)"
+        print(f"{NL}{p['provider']}{state}")
+        for m in p["curated"]:
+            star = "  <-- default if they have no preference" if m.get("default") else ""
+            print(f"  {m['id']:34} effort={m['effort']:7}{star}")
+            print(f"  {'':34} {m['note']}")
+        if p["detected"]:
+            print(f"  also mentioned on this machine, not in the curated list "
+                  f"(needs --force):")
+            for m in p["detected"]:
+                print(f"    {m}")
+        print(f"  effort is a {p['effort_kind']}; accepts: {', '.join(p['efforts'])}")
+    print(f"{NL}Put these to the human and let them choose provider, model and "
+          f"effort. Do not pick silently: the curated list is a suggestion that "
+          f"lags the providers, and a partner they did not choose is one they "
+          f"will not believe when it disagrees with them.")
     return 0
 
 
@@ -1735,29 +1932,31 @@ def cmd_hook_stop(args) -> int:
         print(json.dumps({"decision": "block", "reason": reason}))
         return 0
 
-    # 2. Nothing is waiting -- but if this is the session agent and its
-    # background `wait` is not running, nothing will ever tell it that something
-    # is. `wait` re-stamps lastseen every few seconds while it polls, so a stamp
-    # older than the live window means the listener is gone and this session is
-    # about to go deaf. That is the failure that leaves a spawning session idle
-    # while the human works in the partner's tab.
-    if (entry.get("kind") or "tab") != "session":
-        return 0
-    age = _age_seconds(last_seen(sd, who))
-    if age is not None and age <= LIVE_WINDOW:
+    # 2. Nothing is waiting for an answer -- but is this agent still listening?
+    # A discussion ending, or the baton moving to somebody else, is exactly when
+    # an agent decides it is done and stops; from that moment it is deaf, and
+    # the next thing said to it lands in a transcript nobody is reading. Every
+    # agent goes back to `wait` at the end of every turn, and this is what
+    # enforces it.
+    if is_listening(sd, roster, who):
         return 0
     if _nag_throttled(sd / who / ".stop-nag-live", 120):
         return 0
-    how_stale = "has never been stamped" if age is None else f"is {int(age)}s old"
+    holder = baton_of(roster)
+    lost = f" The baton is {holder}'s, not yours." if holder != who else ""
+    if (entry.get("kind") or "tab") == "session":
+        how = (f"start `{run} wait --timeout 600` as a BACKGROUND command "
+               f"(run_in_background: true) -- never in the foreground, it would "
+               f"block the human out of this session")
+    else:
+        how = (f"run `{run} wait` -- it blocks until somebody addresses you, "
+               f"which is how you stay in the debate")
     reason = (
-        f"You are the session agent ({who}) in a running partner session, but "
-        f"your background `wait` is not running -- `{rel}/lastseen` {how_stale}. "
-        f"Nothing re-invokes this session on its own, so you would go silent the "
-        f"moment the human works in a partner's tab.{NL * 2}"
+        f"You are still a running partner ({who}) but nothing is listening on "
+        f"your behalf: no `wait` is in flight.{lost} Whatever is said next -- by "
+        f"the human in another tab, or by a partner -- you will not see.{NL * 2}"
         f"Before ending the turn: run `{run} read` and answer anything it shows, "
-        f"then start `{run} wait --timeout 600` as a BACKGROUND command "
-        f"(run_in_background: true) -- never in the foreground, it would block "
-        f"the human out of this session.")
+        f"then {how}.")
     print(json.dumps({"decision": "block", "reason": reason}))
     return 0
 
@@ -1785,6 +1984,13 @@ def main() -> int:
     i.set_defaults(fn=cmd_init)
 
     sub.add_parser("providers").set_defaults(fn=cmd_providers)
+
+    md = sub.add_parser("models", help="models to choose from, and the effort "
+                                       "that suits each")
+    md.add_argument("--provider", default=None, help="just this one")
+    md.add_argument("--no-probe", action="store_true",
+                    help="skip the CLI probe; curated list only")
+    md.set_defaults(fn=cmd_models)
     sub.add_parser("list").set_defaults(fn=cmd_list)
     sub.add_parser("snapshot").set_defaults(fn=cmd_snapshot)
 

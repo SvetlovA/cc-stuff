@@ -52,6 +52,20 @@ Effort is the check that earns its keep. `max` is this plugin's own level and wo
 
 The model check is deliberately soft. Model names change faster than this registry does, so an unknown model is a warning with `--force` attached, not a wall. Install and effort failures are hard, because they cannot be worked around by insisting.
 
+## Choosing a model
+
+```bash
+python partner.py models [--provider claude] [--no-probe]
+```
+
+`CATALOG` in `partner.py` holds the curated entries — id, the effort that suits that model, and one line on what it is like to argue with. `PROVIDERS[*]["models"]` is derived from it, so the validator and the recommendation never drift apart.
+
+That list is a starting point, not the truth. `models` also probes the machine — `<bin> --help`, plus the user's own provider config (`~/.codex/config.toml`, `~/.claude/settings.json`, `~/.gemini/settings.json`) — and reports anything it finds that the catalog does not know, under "also mentioned on this machine". No CLI here has a stable *list models* command, so this reads what is present rather than asking.
+
+Detected ids are offers, not facts: appearing in a help page or a config file is not proof the model exists, so they still fail `validate` without `--force`. Ids are filtered to those carrying a version number, which is what keeps `claude-code-setup` and `claude-desktop` out of a model list.
+
+The skill's rule is that the **human chooses**. `models` recommends; it does not decide. A partner the user did not pick is one they will not believe when it disagrees with them.
+
 For `--provider custom`, only the first word of the template is checked for existence — nothing else about a CLI the registry does not know is knowable.
 
 ## Effort

@@ -188,15 +188,18 @@ The starting prompt passed on the command line only says "read `seed.md` and fol
 
 **1. Unanswered messages.** Blocks when a message in `chat.md` is addressed to that agent (by id or `@all`), arrived after the agent last spoke, and has no reply yet: the agent is told to `read` and `send` before it can stop.
 
-**2. A session agent that is not listening.** Blocks when the agent is the `kind: "session"` one and `<id>/lastseen` is missing or older than `LIVE_WINDOW`. `wait` re-stamps `lastseen` every few seconds while it polls, so a stale stamp is direct evidence that no background `wait` is in flight. The agent is told to `read`, then arm one.
+**2. Nobody listening.** Blocks when no `wait` is in flight for that agent, whoever it is and whether or not it holds the baton. `wait` holds `<id>/waiting` for as long as it polls, stamped with its own deadline, so the marker answers *"listening right now"* — where `lastseen` would only answer *"ran a command recently"*, which `send` and `read` satisfy just as well. That distinction is the point: an agent that has just replied and is about to stop looks busy by every other measure. The session agent additionally accepts a fresh `lastseen`, since it backgrounds its `wait` and the marker write can race a Stop firing straight after.
 
-Check 2 is what catches the failure the whole background-`wait` design is exposed to: the session spawns a partner, reports success, and ends the turn without ever entering the loop. `.partner/p1/lastseen` never gets written, nothing re-invokes the session, and the human — now typing in the partner's tab — has an agent that never speaks. Check 1 cannot catch it, because at that moment nothing has been said *to* p1 yet; by the time the partner does speak, the session is already unreachable.
+Check 2 covers the two moments an agent decides it is finished:
 
-A tab agent sits blocked inside a foreground `wait`, so it always has the next message in hand and only check 1 applies to it.
+- **After spawning.** The session registers a partner, reports success, and ends the turn without ever entering the loop. Nothing re-invokes it, and the human — now typing in the partner's tab — has an agent that never speaks. Check 1 cannot catch this: at that moment nothing has been said *to* it yet, and by the time the partner speaks the session is already unreachable.
+- **When a discussion closes, or the baton moves.** Losing the baton demotes an agent to advisor; it does not excuse it from listening. `claim` and `baton` both say so in the system message they append, and check 2 enforces it.
+
+A tab agent inside a foreground `wait` is not stopping, so it never reaches the hook while it is behaving. Reaching it at all means it left the loop.
 
 Details that keep it from getting in the way:
 
-- **The baton holder is exempt.** It drives the change; it is not waiting on anyone. `pending_for` returns nothing for it.
+- **The baton holder is exempt from check 1.** It drives the change; it is not waiting on anyone. `pending_for` returns nothing for it. Check 2 still applies — driving is not an excuse for going deaf.
 - **Own messages never count** — an agent cannot owe itself a reply (`m["from"] != who`).
 - **It nags at a bounded rate.** `.partner/<id>/.stop-nag` holds the transcript size at the last message block — an identical size means "already told them". `.stop-nag-live` throttles the listener warning to once every 120s, since that one is not tied to a new message. A genuinely stuck agent is never wedged in an unbreakable loop.
 - **It fails open.** No Python, no `.partner/`, or an unregistered/stopped agent — the stop proceeds.
