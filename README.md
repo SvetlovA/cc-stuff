@@ -6,6 +6,7 @@ A public collection of Claude Code plugins for developer workflows. Install any 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
+| [partner-agents](./partner-agents/) | Spawn peer AI agents in new terminal tabs that debate every decision with you, with an exclusive write baton | 0.1.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.6.1 |
 
 ## Installing a Plugin
@@ -24,6 +25,23 @@ cc --plugin-dir ./cc-stuff/<plugin-name>
 ```
 
 ## Plugin Overview
+
+### [partner-agents](./partner-agents/)
+
+Spawns peer AI agents into new terminal tabs so decisions get argued before they get made:
+
+- Launches a partner on **any provider** — `claude`, `codex`, `gemini`, or any CLI via a one-line `--cmd` template — with its own model and effort level
+- Opens a real tab on **Windows, macOS, and Linux** (Windows Terminal, iTerm2, Terminal.app, GNOME Terminal, Konsole, WezTerm, kitty, tmux, zellij), and prints a manual command when there is no terminal
+- Passes a **handoff briefing** so the partner joins mid-work already knowing what was decided and what is open
+- Puts **every question and decision** to the partners, weighs the pushback against the code, and reports the disagreement instead of hiding it
+- Enforces a **write baton**: all partners can edit, but only the one you are addressing does — applied as a real sandbox flag per round
+- Runs **as many partners as you want**, all debating in one shared `.partner/chat.md` transcript
+
+**Invoke with:** `/partner [provider] [model] [effort]`, plus `/partner list`, `/partner baton <id>`, `/partner stop`
+
+**Requires:** Python 3.9+ and at least one agent CLI installed
+
+---
 
 ### [pr-review-toolkit](./pr-review-toolkit/)
 

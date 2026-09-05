@@ -5,6 +5,11 @@
   },
   "plugins": [
     {
+      "name": "partner-agents",
+      "source": "./partner-agents",
+      "description": "Spawn peer AI agents (Claude, Codex, Gemini, or any CLI) in new terminal tabs that debate every decision with you through a shared transcript, with an exclusive write baton"
+    },
+    {
       "name": "pr-review-toolkit",
       "source": "./pr-review-toolkit",
       "description": "Address GitHub PR review comments — fetch active threads, recommend plan vs. on-the-fly mode, apply code fixes, resolve or reply, then commit"
