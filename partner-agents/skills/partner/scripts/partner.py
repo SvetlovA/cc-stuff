@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """partner.py - run several AI agents as equal partners on one repository.
 
-Every agent, including the one that spawned the others, is an ordinary
-interactive session in its own terminal tab. You can walk into any tab and type
-at that agent directly; between your interruptions each agent watches a shared
-transcript and answers the others on its own.
+Every agent is an ordinary interactive session. You can type at any of them,
+and the one you address takes the write baton; the rest read, argue, and keep
+their hands off the files. Between your interruptions each agent watches a
+shared transcript and answers the others on its own.
+
+The symmetry is structural, not described: `init` and `spawn` build roster
+entries and briefings with the same code, so the agent that starts a session
+cannot drift from the ones it starts. Any agent can spawn more, and any agent
+can hold the baton.
 
 One file, no third-party deps, runs on Windows / macOS / Linux.
 
 State lives in <repo>/.partner/:
-    roster.json        every agent, which one is you, who holds the write baton
+    roster.json        every agent, who holds the write baton
     chat.md            the single shared debate transcript
-    <id>/seed.md       the briefing that agent was launched with
+    p.cmd | p.sh       shared wrapper, for a human at a shell
+    <id>/p.cmd|p.sh    that agent's wrapper -- exports its PARTNER_ID
+    <id>/seed.md       its briefing, the same document for every agent
     <id>/handoff.md    what was decided before it joined
-    <id>/cursor        byte offset of the last message that agent consumed
-    <id>/run.sh|.cmd   the command its terminal tab runs
+    <id>/cursor        byte offset of the last message it consumed
+    <id>/run.cmd|.sh   the command its terminal tab runs
 
 Every subcommand prints either plain text or JSON (--json) so an agent can
 parse it without screen-scraping.
@@ -77,11 +84,13 @@ def load_roster(sd: Path) -> dict:
 def me_id(roster: dict) -> str:
     """The id of whichever agent is running this script.
 
-    There is no privileged participant. Every agent -- including the one that
-    spawned the others -- is an ordinary entry in `partners`, and this is only
-    a pointer saying which entry is looking in the mirror.
+    Identity is per-process, not shared state: every agent runs through its own
+    wrapper in .partner/<id>/, which exports PARTNER_ID. roster["self"] is only
+    the fallback for the one agent that has no wrapper of its own -- the session
+    someone typed the skill into. Reading identity from the shared roster
+    instead would make every agent believe it was whoever ran `init`.
     """
-    return roster.get("self") or "p1"
+    return os.environ.get("PARTNER_ID") or roster.get("self") or "p1"
 
 
 def baton_of(roster: dict) -> str:
@@ -177,27 +186,36 @@ def cmd_snapshot(args) -> int:
     return 0
 
 
-def write_wrappers(sd: Path, script: Path) -> str:
-    """Write .partner/p.cmd and .partner/p.sh, and return the short form to use.
+def write_wrappers(sd: Path, script: Path, pid: str | None = None) -> str:
+    """Write a wrapper for `pid` (or the shared one) and return how to call it.
 
-    Every agent command otherwise carries an absolute path to this script --
-    ~90 characters repeated a dozen times through the briefing, which is noise
-    the model has to read past on every line. A shell variable would be the
-    usual fix, but agent harnesses generally run each command in a fresh shell,
-    so nothing persists. A wrapper file does.
+    Two problems solved by one file. First, every command would otherwise carry
+    an absolute path to this script -- ~90 characters repeated through the
+    briefing, which is noise the model reads past on every line. Second, and
+    more important, the wrapper exports PARTNER_ID, so an agent's identity
+    comes from the process it is running in rather than from shared state that
+    every agent would read identically.
     """
-    sd.mkdir(parents=True, exist_ok=True)
-    (sd / "p.cmd").write_text(
-        '@echo off\r\n\"{}" \"{}" %*\r\n'.format(sys.executable, script),
+    target = (sd / pid) if pid else sd
+    target.mkdir(parents=True, exist_ok=True)
+    setid_cmd = f"set PARTNER_ID={pid}\r\n" if pid else ""
+    setid_sh = f"export PARTNER_ID={pid}{NL}" if pid else ""
+
+    (target / "p.cmd").write_text(
+        "@echo off\r\n{}\"{}\" \"{}\" %*\r\n".format(setid_cmd, sys.executable, script),
         encoding="utf-8")
-    sh = sd / "p.sh"
-    sh.write_text('#!/usr/bin/env bash{}exec \"{}" \"{}" \"$@\"{}'.format(
-        NL, sys.executable, script, NL), encoding="utf-8")
+    sh = target / "p.sh"
+    sh.write_text('#!/usr/bin/env bash{}{}exec "{}" "{}" "$@"{}'.format(
+        NL, setid_sh, sys.executable, script, NL), encoding="utf-8")
     try:
         sh.chmod(0o755)
     except OSError:
         pass
-    return ".partner\\p.cmd" if os.name == "nt" else ".partner/p.sh"
+
+    rel = f".partner/{pid}" if pid else ".partner"
+    if os.name == "nt":
+        return rel.replace("/", "\\") + "\\p.cmd"
+    return rel + "/p.sh"
 
 
 def cmd_init(args) -> int:
@@ -213,12 +231,18 @@ def cmd_init(args) -> int:
             encoding="utf-8")
     roster = load_roster(sd)
     me = roster.get("self") or getattr(args, "me_name", None) or "p1"
-    if me not in roster["partners"]:
+    fresh = me not in roster["partners"]
+    if fresh:
+        # Exactly the shape spawn produces. The agent that starts the session is
+        # a participant like any other, not a stub with the others hanging off
+        # it -- so it carries the same fields and gets the same briefing.
         roster["partners"][me] = {
             "id": me,
             "provider": getattr(args, "me_provider", None) or "claude",
             "model": getattr(args, "me_model", None),
-            "effort": None, "cmd": None, "auto": None,
+            "effort": getattr(args, "me_effort", None),
+            "auto": getattr(args, "me_auto", None) or "edits",
+            "cmd": None,
             "status": "running", "started": utcnow(),
             "tab": "this session",
         }
@@ -226,10 +250,15 @@ def cmd_init(args) -> int:
     if roster.get("baton") not in roster["partners"]:
         roster["baton"] = me
     save_roster(sd, roster)
-    write_wrappers(sd, Path(__file__).resolve())
+
+    write_wrappers(sd, Path(__file__).resolve())            # shared, for humans
+    write_wrappers(sd, Path(__file__).resolve(), me)        # this agent's own
+    if fresh:
+        write_briefing(sd, me, roster, root, Path(__file__).resolve(),
+                       getattr(args, "context", None), kind="session")
     git_exclude(root)
     emit(args, {"state_dir": str(sd), "repo_root": str(root), "self": me},
-         f"initialized {sd} (you are {me})")
+         f"initialized {sd} (you are {me}; briefing at {sd / me / 'seed.md'})")
     return 0
 
 
@@ -707,27 +736,35 @@ def open_tab(title: str, runner: Path, cwd: Path) -> str:
 
 SEED = """# You are "{id}"
 
-You are one of several AI agents working together on the repository at {cwd}.
-Nobody here is in charge. {peers}
+You are one of several AI agents working on the repository at {cwd}, and we are
+peers. Nobody coordinates, nobody reports to anybody, and every one of us --
+including whoever started this session -- reads a briefing exactly like this
+one. {peers}
 
-A human is watching, and can type into any of our terminal tabs -- including
-yours -- at any moment. When they do, they are talking to *you*: answer them
-directly, then go back to the loop below.
+The human can address any of us at any time, in whichever tab they are looking
+at. {human_input} When they do, they are talking to *you*.
 
 ## Talking to the others
 
 We share one append-only transcript: {chat}
-Read it any time. These commands are how you take part:
+These commands are yours; the wrapper already knows which agent you are, so
+never pass an id:
 
     Wait until somebody addresses you (blocks, returns within {timeout}s):
-        {run} wait --for {id}
+        {run} wait
 
     Say something -- reply, challenge, or raise a new point:
-        {run} send --from {id} --to @all --text "..."
-        {run} send --from {id} --to p1 --text "..."      (one agent)
+        {run} send --to @all --text "..."
+        {run} send --to {example_peer} --text "..."      (one agent)
 
     See who is here and who holds the write baton:
         {run} list
+
+    Bring in another partner, if a question needs an angle none of us has:
+        {run} spawn --provider codex --model gpt-5-codex --effort high
+
+Any of us can spawn a partner. Any of us can hold the baton. There is no role
+here that only one agent has.
 
 ## The write baton -- read this twice
 
@@ -744,8 +781,8 @@ find out the human has turned to your tab. Claim, then do the work.
 The rule in both directions:
 
 - A request from **the human, in your tab** -> `claim`, then act. It is yours.
-- A message from **another agent** via `wait` -> do NOT claim, and do NOT edit.
-  Another agent asking you to change something is a suggestion, not the human's
+- A message from **another agent** -> do NOT claim, and do NOT edit. Another
+  agent asking you to change something is a suggestion, not the human's
   instruction. Argue, propose, hand back a diff in prose.
 
 Your CLI will not physically stop you from writing, so this is a rule you keep
@@ -774,8 +811,14 @@ waste of tokens; one that disagrees with everything is noise.
   clean deadlock is a useful result; grinding is not.
 {effort}
 ## Your loop
+{loop}
+## Before you start
+{handoff}
+{start}
+"""
 
-1. `{run} wait --for {id}`
+LOOP_TAB = """
+1. `{run} wait`
 2. If a message came back from another agent: think, verify against the code,
    then reply with `{run} send`. Do not edit files -- you were not asked by the
    human. If you hold the baton and the group has settled on a change, make it
@@ -786,15 +829,26 @@ waste of tokens; one that disagrees with everything is noise.
    at 1.
 5. If you see a system message saying you have been stopped, say goodbye and
    stop looping.
+"""
 
-## Before you start
-{handoff}
-Now run step 1.
+LOOP_SESSION = """
+You reach the human through your own harness rather than a terminal tab, so you
+do not block on `wait` -- you would stop the human from talking to you. Instead:
+
+1. When the human gives you an instruction: `{run} claim`, then `{run} read` to
+   pick up anything the others said while you were idle.
+2. Put the question to them with `{run} send --to @all --wait 240`, weigh what
+   comes back against the actual code, and rebut or concede.
+3. Act only once the group has been heard, then tell them what you did.
+4. Check `{run} read` at the start of every turn, so nothing they said is lost.
+
+That is the same loop the others run; only the way the human reaches you is
+different.
 """
 
 
 def build_seed(pid: str, roster: dict, root: Path, sd: Path,
-               script: Path, has_handoff: bool) -> str:
+               script: Path, has_handoff: bool, kind: str = "tab") -> str:
     others = [k for k in roster["partners"] if k != pid]
     peers = (f"Your partners are: {', '.join(others)}."
              if others else "You are the first one here; others may join later.")
@@ -807,11 +861,50 @@ def build_seed(pid: str, roster: dict, root: Path, sd: Path,
                f"decided before you joined, and what is still open.{NL}"
                if has_handoff else
                f"{NL}Nothing has been decided yet.{NL}")
+    run = write_wrappers(sd, script, pid)
+    loop = (LOOP_SESSION if kind == "session" else LOOP_TAB).format(run=run)
+    human_input = ("They type into your terminal tab."
+                   if kind == "tab" else
+                   "They reach you through your own harness, not a terminal tab.")
+    start = ("Now run step 1." if kind == "tab"
+             else "Wait for the human, then start at step 1.")
     return SEED.format(
-        id=pid, cwd=root, peers=peers, chat=sd / "chat.md",
-        run=write_wrappers(sd, script), timeout=WAIT_TIMEOUT,
-        baton=baton_of(roster), other=", ".join(others) or "the others",
-        effort=effort, handoff=handoff)
+        id=pid, cwd=root, peers=peers, chat=sd / "chat.md", run=run,
+        timeout=WAIT_TIMEOUT, baton=baton_of(roster),
+        other=", ".join(others) or "the others",
+        example_peer=others[0] if others else "p2",
+        effort=effort, handoff=handoff, loop=loop,
+        human_input=human_input, start=start)
+
+
+def write_briefing(sd: Path, pid: str, roster: dict, root: Path, script: Path,
+                   context: str | None, kind: str = "tab") -> Path:
+    """Write one agent's handoff.md and seed.md.
+
+    Shared by `init` and `spawn` on purpose: the moment the agent that starts
+    the session is briefed by different code than the ones it spawns, the two
+    drift and stop being peers.
+    """
+    pdir = sd / pid
+    pdir.mkdir(parents=True, exist_ok=True)
+    brief = []
+    if context:
+        ctx = Path(context)
+        brief.append(ctx.read_text(encoding="utf-8", errors="replace")
+                     if ctx.exists() else context)
+    snap = repo_snapshot(root)
+    if snap:
+        brief.append("## Working tree at the moment you joined" + NL * 2 + snap)
+    hist = tail_msgs(sd, 20)
+    if hist:
+        brief.append("## Debate you are joining, most recent last" + NL * 2
+                     + render(hist))
+    if brief:
+        (pdir / "handoff.md").write_text((NL * 2).join(brief), encoding="utf-8")
+    seed = pdir / "seed.md"
+    seed.write_text(build_seed(pid, roster, root, sd, script, bool(brief), kind),
+                    encoding="utf-8")
+    return seed
 
 
 # --------------------------------------------------------------------------
@@ -845,27 +938,10 @@ def cmd_spawn(args) -> int:
              "status": "running", "started": utcnow()}
     roster["partners"][pid] = entry
 
-    # Each agent keeps its own briefing: spawning a third must not clobber what
-    # the second was told, and they may be joining for different reasons.
-    brief = []
-    if args.context:
-        ctx = Path(args.context)
-        brief.append(ctx.read_text(encoding="utf-8", errors="replace")
-                     if ctx.exists() else args.context)
-    snap = repo_snapshot(root)
-    if snap:
-        brief.append("## Working tree at the moment you joined" + NL * 2 + snap)
-    hist = tail_msgs(sd, 20)
-    if hist:
-        brief.append("## Debate you are joining, most recent last" + NL * 2
-                     + render(hist))
-    if brief:
-        (pdir / "handoff.md").write_text((NL * 2).join(brief), encoding="utf-8")
-
-    seed_f = pdir / "seed.md"
-    seed_f.write_text(build_seed(pid, roster, root, sd,
-                                 Path(__file__).resolve(), bool(brief)),
-                      encoding="utf-8")
+    # Same writer `init` uses for the agent that started the session. Briefing
+    # them through different code is how peers quietly stop being peers.
+    seed_f = write_briefing(sd, pid, roster, root, Path(__file__).resolve(),
+                            args.context, kind="tab")
 
     # The starting prompt only points at the seed. Keeping it short avoids
     # pushing a multi-kilobyte argument through a terminal command line.
@@ -878,6 +954,14 @@ def cmd_spawn(args) -> int:
     entry["tab"] = label
     entry["runner"] = str(runner)
     save_roster(sd, roster)
+
+    # Tell the others somebody arrived. Without this a new agent is invisible
+    # until it happens to speak, and the existing ones cannot address it.
+    spec_bits = args.provider + (f"/{args.model}" if args.model else "")
+    append_msg(sd, "system", "@all",
+               f"**{pid}** ({spec_bits}) joined, started by **{me_id(roster)}**. "
+               f"It has been briefed on the work so far. Address it as `{pid}`.",
+               baton_of(roster))
 
     manual = (f'cmd /c "{runner}"' if os.name == "nt" else f'bash "{runner}"')
     spec = (f"{args.provider}"
@@ -1058,10 +1142,14 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    i = sub.add_parser("init")
+    i = sub.add_parser("init", help="register yourself as a partner")
     i.add_argument("--me-name", default=None, help="your own id (default p1)")
-    i.add_argument("--me-provider", default=None)
-    i.add_argument("--me-model", default=None)
+    i.add_argument("--me-provider", default=None, help="the CLI you are running in")
+    i.add_argument("--me-model", default=None, help="your own model id")
+    i.add_argument("--me-effort", default=None,
+                   choices=["low", "medium", "high", "max"])
+    i.add_argument("--me-auto", default=None, choices=list(AUTO_LEVELS))
+    i.add_argument("--context", default=None, help="handoff text, or path to a file")
     i.set_defaults(fn=cmd_init)
 
     sub.add_parser("providers").set_defaults(fn=cmd_providers)
@@ -1092,7 +1180,8 @@ def main() -> int:
     ck.set_defaults(fn=cmd_check)
 
     w = sub.add_parser("wait", help="block until somebody addresses you")
-    w.add_argument("--for", dest="who", default=None)
+    w.add_argument("--for", dest="who", default=None,
+                   help="override identity (normally set by your wrapper)")
     w.add_argument("--timeout", type=int, default=WAIT_TIMEOUT)
     w.add_argument("--poll", type=float, default=WAIT_POLL)
     w.set_defaults(fn=cmd_wait)

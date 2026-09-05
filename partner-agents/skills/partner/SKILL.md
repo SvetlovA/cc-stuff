@@ -3,14 +3,14 @@ name: partner
 description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
 argument-hint: "[provider] [model] [effort] | list | baton <id> | stop [id]"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion
-version: 0.3.0
+version: 0.4.0
 ---
 
 # Partner
 
-Run several AI agents — Claude, Codex, Gemini, or any CLI — as equal partners on one repository, each in its own terminal tab, debating every question through a shared markdown transcript before anyone acts.
+Run several AI agents — Claude, Codex, Gemini, or any CLI — as equal partners on one repository, each in its own terminal tab, debating every question through a shared transcript before anyone acts.
 
-A partner is not a subagent. It is a full interactive session with its own model and its own opinion, and it can tell you that you are wrong. The point is friction: two models that disagree surface assumptions one model alone glides past. The user can walk into any tab and type at that agent directly; between those interruptions it watches the transcript and answers the others on its own.
+A partner is not a subagent. It is a full interactive session with its own model and its own opinion, and it can tell you that you are wrong. The point is friction: two models that disagree surface assumptions one alone glides past. The user can type at any of them directly; between interruptions each watches the transcript and answers the others on its own.
 
 All commands go through one script:
 
@@ -22,11 +22,13 @@ After `init` a short wrapper also exists at `.partner/p.cmd` (Windows) or `.part
 
 ## The write baton
 
-There is no privileged agent. This session registers itself in the roster as an ordinary participant — `p1` by default — exactly like the ones it spawns, and `list` marks which one is you.
+There is no privileged agent. This session registers itself as an ordinary participant — `p1` by default — with the same config and the same briefing as the ones it spawns; `list` marks which one is you.
 
-Every agent *can* edit files: they run with permission prompting relaxed, so the user is not answering dialogs in three tabs at once. What decides who actually edits is the **baton**, a single value in `.partner/roster.json`.
+Every agent *can* edit files: they run with prompting relaxed, so the user is not answering dialogs in three tabs at once. What decides who actually edits is the **baton** in `.partner/roster.json`.
 
-**The rule: only the agent the user just gave an instruction to may write.** The baton follows the user's attention around the tabs. Nothing outside a tab can observe where they are typing, so whichever agent receives the instruction is the one that has to say so.
+**The rule: only the agent the user just gave an instruction to may write.** The baton follows the user's attention around the tabs, and the user can start from *any* of them — this session has no special claim on it. Nothing outside a tab can observe where they are typing, so whichever agent receives the instruction is the one that has to say so.
+
+Each agent runs through its own wrapper in `.partner/<id>/`, which carries its identity, so `claim`, `read`, `wait` and `send` never take an id. Any agent can `spawn` more partners too — no role belongs to one agent.
 
 **When the user gives you an instruction, claim the baton before doing anything else:**
 
@@ -50,13 +52,16 @@ Because partners run unprompted, this is a rule they keep rather than a wall the
 
 ### Step 1 — Settle the configuration
 
-First register yourself, so the roster describes every participant accurately rather than guessing at yours:
+First register yourself. You are a participant, not the thing the others hang off, so describe yourself as fully as you will describe them:
 
 ```bash
-python "$P" init --me-provider claude --me-model <this session's model id>
+python "$P" init --me-provider claude --me-model <this session's model id> \
+  --me-effort high --me-auto edits
 ```
 
-This takes `p1` and costs nothing if it has already run. Spawned agents continue from `p2`.
+This takes `p1`, writes you the same briefing every spawned agent gets (`.partner/p1/seed.md`), and costs nothing if it has already run. Spawned agents continue from `p2`.
+
+**Read your own briefing** — the same document the others receive.
 
 Four settings define a new partner: **provider**, **model**, **effort**, and **auto** level. Take whatever the user supplied and only ask about the rest.
 
@@ -74,11 +79,11 @@ Then validate the combination before spawning:
 python "$P" check --provider codex --model gpt-5-codex --effort high
 ```
 
-`spawn` runs the same checks and refuses rather than opening a doomed tab, but calling `check` first lets you fix the problem in conversation. It verifies the CLI is installed *and* runs, the effort level is one that provider accepts, and the model is one it knows.
+`spawn` runs the same checks and refuses rather than opening a doomed tab; calling `check` first lets you fix it in conversation. It verifies the CLI is installed *and* runs, the effort level is accepted by that provider, and the model is known.
 
-Every problem comes back with the command that fixes it — relay that verbatim rather than paraphrasing. Model lists go stale faster than this plugin does, so an unknown model is the one soft failure: offer `--force` rather than arguing.
+Each problem comes back with the command that fixes it — relay it verbatim. An unknown model is the one soft failure: offer `--force` rather than arguing.
 
-**Auto levels** control how often a partner stops to ask permission — a prompt in a tab nobody is watching stalls the debate. `--auto edits` (the default) accepts file edits while keeping the CLI's sandbox; `ask` keeps normal prompting; `full` removes both. Per-provider flags are in `references/providers.md`.
+**Auto levels** control how often a partner stops to ask permission — a prompt in an unwatched tab stalls the debate. `--auto edits` (default) accepts file edits while keeping the sandbox; `ask` keeps normal prompting; `full` removes both. Per-provider flags: `references/providers.md`.
 
 For a CLI not in the registry, use `--provider custom` with a command template:
 
@@ -91,7 +96,7 @@ python "$P" spawn --provider custom --model gpt-4o \
 
 ### Step 2 — Brief the partner on what it is joining
 
-A partner can be spawned at **any** point — before work starts, or twenty exchanges into a hard problem. Mid-work is the normal case, and it is where briefing matters most: a partner that does not know what was already settled will reopen it, confidently.
+A partner can be spawned at **any** point, and mid-work is the normal case — which is where briefing matters most: a partner that does not know what was settled will reopen it, confidently.
 
 Each partner gets its own briefing at `.partner/<id>/handoff.md`, so spawning a third never disturbs what the second was told. The branch, uncommitted diff and the debate so far are collected **automatically**, so even a hurried spawn produces a useful partner. What **you** add via `--context` is what stops it re-litigating: state which decisions are closed and *why*, not a narrative of what was typed.
 
@@ -124,7 +129,7 @@ If any partner is `running`, do not answer the user directly. Run this loop inst
 
 **0. Claim the baton.** The user just gave *you* the instruction, so the write permission is yours: `python "$P" claim`. It is a no-op if you already hold it, and it tells the partners to stop editing.
 
-**1. State a position first.** Form your own answer before asking. A partner given a blank question anchors on nothing; one given a concrete claim has something to attack. Include your reasoning and what you are unsure about.
+**1. State a position first.** Form your own answer before asking — a partner given a blank question anchors on nothing, one given a concrete claim has something to attack. Include your reasoning and your doubts.
 
 **2. Put it to the partners.**
 
@@ -134,13 +139,13 @@ python "$P" send --to @all --wait 240 --text "..."
 
 `--from` defaults to your own id. `--wait` blocks until they reply and prints the replies. Partners answer when they next return from `wait`, so allow more time than a single model round would take. Without `--wait`, `send` returns immediately and you collect replies later with `read`.
 
-**3. Take the disagreement seriously.** A partner that objects has usually noticed something. Check the claim against the code before accepting or rejecting it — do not concede to be agreeable, and do not dismiss to defend your first answer. Where it is right, say so plainly and change course.
+**3. Take the disagreement seriously.** A partner that objects has usually noticed something. Check the claim against the code — do not concede to be agreeable, nor dismiss to defend your first answer. Where it is right, say so and change course.
 
-**4. Rebut or converge.** If you still disagree after checking, say why and send it back. Two or three exchanges is normally enough. Real deadlocks are informative, not failures: when partners still disagree after a genuine exchange, the decision is a judgement call and belongs to the user. Present both positions and their strongest arguments, and let them choose.
+**4. Rebut or converge.** Still disagree after checking? Say why and send it back. Two or three exchanges is normally enough. Deadlocks are informative, not failures: a question two models cannot settle is a judgement call that belongs to the user — give both positions fairly and let them choose.
 
 **5. Act, then report.** The baton holder makes the change. Tell the user what was decided, what the disagreement was, and what changed the answer — more useful than a summary that hides the argument.
 
-Skip the loop only for mechanical lookups where there is nothing to disagree about ("what does this file do", "run the tests"). Anything involving a design choice, a trade-off, a code change, or an unclear cause goes to the partners.
+Skip the loop only for mechanical lookups with nothing to disagree about ("what does this file do", "run the tests"). Any design choice, trade-off, code change, or unclear cause goes to the partners.
 
 ## Reference
 
@@ -157,6 +162,7 @@ python "$P" send --to @all --text "..." [--wait 240]   # --from defaults to you
 python "$P" read [--peek]                   # new messages; --peek keeps the cursor
 python "$P" wait [--for id] [--timeout 120] # block until addressed; partners use this
 python "$P" claim                           # user just told YOU to act: take the baton
+python "$P" init --me-provider X --me-model M [--me-effort E] [--me-auto A]
 python "$P" baton [--to p2]                 # show, or hand over deliberately
 python "$P" stop --id p2 | --all            # stop partners, then close their tabs
 ```

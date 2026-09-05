@@ -18,7 +18,21 @@ Every agent is an ordinary entry in `roster.json`, including the one that spawne
 
 `baton` names the agent the human most recently gave an instruction to, and it is the only agent that may edit files. See "How the baton moves" below.
 
-`self` is not a rank — it only records which entry belongs to the agent reading the file, so `send` and `read` can default `--from` and `--for` sensibly. Whoever runs `init` takes `p1`; spawned agents continue the numbering. `stop --all` stops every spawned agent and leaves the session's own entry alone, since it has no tab to close.
+Whoever runs `init` takes `p1`; spawned agents continue the numbering. Every entry has the same shape — provider, model, effort, auto level, status — because `init` and `spawn` build them with the same code. The agent that starts the session is a participant, not the thing the others hang off.
+
+### Identity is per-process
+
+Each agent runs through its own wrapper at `.partner/<id>/p.cmd` (or `p.sh`), which exports `PARTNER_ID` before calling the script:
+
+```
+@echo off
+set PARTNER_ID=p2
+"python" "…/partner.py" %*
+```
+
+So `claim`, `read`, `wait` and `send` need no id passed to them — the process knows who it is. This matters more than convenience: if identity were read from the shared `roster.json`, every agent would resolve to whoever ran `init`, and a partner running `claim` would take the baton *on that agent's behalf*. `self` survives only as the fallback for the one agent with no wrapper of its own — the session someone typed the skill into.
+
+`stop --all` stops every other agent and leaves the caller's own entry alone, since it has no tab to close.
 
 The single asymmetry in the system is the baton, and it moves.
 
@@ -53,11 +67,14 @@ Because partners launch with permission prompting relaxed, this is a rule agents
 ├── chat.md            the shared transcript
 ├── p.cmd / p.sh       short wrapper -- how agents invoke partner.py
 └── <id>/
+    ├── p.cmd / p.sh   this agent's wrapper -- carries its PARTNER_ID
     ├── seed.md        the briefing this agent was launched with
     ├── handoff.md     what was decided before it joined
     ├── cursor         byte offset of the last message it consumed
     └── run.cmd|.sh    the exact command its terminal tab runs
 ```
+
+Every agent has an `<id>/` directory, including the one that started the session. If one of them were missing a briefing or a wrapper, it would not be a peer.
 
 `.partner/` is added to `.git/info/exclude` by `partner.py init`, so it is ignored locally without modifying a tracked `.gitignore`.
 
@@ -91,15 +108,20 @@ Because the cursor is a byte offset rather than a message index, an agent that w
 There is no supervising process. Each agent is an ordinary interactive session that drives itself, using the wrapper written at `.partner/p.cmd` (Windows) or `.partner/p.sh` (macOS/Linux):
 
 ```bash
-.partner/p.sh wait --for p2                       # blocks until addressed
-.partner/p.sh send --from p2 --to @all --text ".."
-.partner/p.sh claim                               # the human just addressed me
-.partner/p.sh list                                # who is here, who holds the baton
+.partner/p2/p.sh wait                     # blocks until addressed
+.partner/p2/p.sh send --to @all --text ".."
+.partner/p2/p.sh claim                    # the human just addressed me
+.partner/p2/p.sh spawn --provider gemini  # bring in another partner
+.partner/p2/p.sh list                     # who is here, who holds the baton
 ```
+
+Any agent can run any of these, `spawn` included. `.partner/p.sh` (no id) is the shared wrapper, for a human at a shell.
 
 `wait` is what makes an interactive session autonomous. It polls the transcript and blocks until a message arrives for that agent, so the agent has something to answer rather than needing to be driven. It always returns within `--timeout` (default 120s) even when nothing arrives, which matters twice over: the tab never looks wedged, and the human can interrupt and type instead.
 
 The briefing tells each agent to loop — `wait`, think, `send`, repeat — and to answer the human directly whenever they type into its tab, then resume.
+
+The one agent that does **not** block on `wait` is the session someone typed the skill into: it reaches the human through its own harness, and blocking would stop them talking to it. Its briefing gives it the same loop with `read` at the start of each turn in place of the block. That is the only difference between any two agents here, and it comes from how the human reaches them, not from rank.
 
 ## What an agent is launched with
 
@@ -122,6 +144,8 @@ There is no mechanical round limit, because no supervising process exists to enf
 That is the right place for the rule. A deadlock between two models is a genuine signal that the question is a judgement call, and the human is the one who should break it; grinding on produces confident-sounding convergence that reflects stamina rather than correctness.
 
 ## Failure modes
+
+**A new agent nobody addresses.** `spawn` announces arrivals in the transcript (`system` message naming the id), so the others learn to address it. If that message is missing, the spawn did not complete.
 
 **An agent reopening a settled question.** It joined without the history, or `--context` never said the question was closed. Check `.partner/<id>/handoff.md`.
 
