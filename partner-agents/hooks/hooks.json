@@ -1,0 +1,16 @@
+{
+  "description": "Keeps a partner agent from ending its turn while a message in the shared transcript is still waiting for its reply.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

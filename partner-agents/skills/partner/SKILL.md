@@ -168,6 +168,8 @@ python "$P" spawn --provider X [--model M] [--effort low|medium|high|max]
 python "$P" send --to @all --text "..." [--wait 240]   # --from defaults to you
 python "$P" read [--peek]                   # new messages; --peek keeps the cursor
 python "$P" wait [--for id] [--timeout 120] # block until addressed; partners use this
+python "$P" pending                         # messages you still owe a reply to
+python "$P" hook-stop                        # internal: the Stop-hook backstop
 python "$P" claim                           # user just told YOU to act: take the baton
 python "$P" init --me-provider X --me-model M [--me-effort E] [--me-auto A]
                                             # rarely needed; spawn does this
@@ -178,6 +180,8 @@ python "$P" stop --id p2 | --all            # stop partners, then close their ta
 Add `--json` to any command for machine-readable output.
 
 State lives in `.partner/` at the repo root — `chat.md` is the full transcript, readable at any time. `init` adds `.partner/` to `.git/info/exclude`, so it is ignored locally without touching a tracked `.gitignore`.
+
+A `Stop` hook (`hooks/hooks.json`) stops any agent — this session included — from ending a turn while a message to it or `@all` sits unanswered in `chat.md`; it points them at `read`/`send` first. The baton holder is exempt, own messages do not count, and it fails open. `references/protocol.md` covers it.
 
 ## Deeper reference
 

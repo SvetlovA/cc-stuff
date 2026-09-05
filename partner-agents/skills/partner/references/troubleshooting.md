@@ -16,7 +16,9 @@
 
 **Partner stopped looping.** Interactive agents sometimes end their turn instead of running `wait` again. Type "continue" in its tab, or `send` it a message. The briefing now tells them the loop is the whole job and to return to `wait` after every reply.
 
-**This session (`p1`) stays silent while the user works in a partner's tab.** Its background `wait` is not armed, so nothing re-invokes it when a partner addresses `@all`. It re-arms one at the end of every turn — if it stopped, the next instruction in the main session starts it again (debate loop, step 4). `.partner/p1/lastseen` with a fresh timestamp means the background `wait` is live.
+**This session stays silent while the user works in a partner's tab.** Its background `wait` is not armed, so nothing re-invokes it when a partner addresses `@all`. It re-arms one at the end of every turn — if it stopped, the next instruction in the main session starts it again (debate loop, step 4). A fresh `.partner/<id>/lastseen` timestamp means the background `wait` is live. The `Stop` hook is the backstop: whenever the session *is* invoked, it cannot end a turn while a message to it is unanswered.
+
+**The Stop hook is not firing.** `hooks.json` loads once at session start — a session open before the plugin was installed will not have it; restart. It also needs `bash` and Python on `PATH`. Test from the repo root: `python <plugin>/skills/partner/scripts/partner.py hook-stop < /dev/null` prints nothing and exits 0 when nothing is owed. A `.partner/<id>/.stop-nag` file that matches the current `chat.md` size means it already nagged and is holding off — expected.
 
 **Partners only ever reply to the baton holder, never each other.** The advisors are meant to debate among themselves and hand the holder a joint view — `send --to p3`, not just `--to @all`. If every message is a spoke to one hub, `send` one advisor a direct question to seed a side thread.
 

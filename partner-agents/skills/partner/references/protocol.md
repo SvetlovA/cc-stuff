@@ -182,6 +182,20 @@ The one agent that does **not** block on `wait` is the session someone typed the
 
 The starting prompt passed on the command line only says "read `seed.md` and follow it", which keeps a multi-kilobyte briefing out of a terminal command line.
 
+## The Stop hook
+
+`hooks/hooks.json` registers a `Stop` hook — `partner.py hook-stop` — that runs each time any agent's turn ends. It blocks the stop when a message in `chat.md` is addressed to that agent (by id or `@all`), arrived after the agent last spoke, and has no reply yet: the agent is told to `read` and `send` before it can stop.
+
+This is the deterministic floor under the loop, and it matters most for the session agent. A tab agent sits blocked inside a foreground `wait`, so it always has the next message in hand; the session agent does not block, and if its background `wait` is not running — never armed, or dropped after a timeout — nothing else brings it back to the transcript. The hook guarantees that whenever it *is* running, it cannot end a turn while a question to it is still open.
+
+Details that keep it from getting in the way:
+
+- **The baton holder is exempt.** It drives the change; it is not waiting on anyone. `pending_for` returns nothing for it.
+- **Own messages never count** — an agent cannot owe itself a reply (`m["from"] != who`).
+- **It nags once per new message.** The marker `.partner/<id>/.stop-nag` holds the transcript size at the last block; an identical size means "already told them", so a genuinely stuck agent is never wedged in an unbreakable loop.
+- **It fails open.** No Python, no `.partner/`, or an unregistered/stopped agent — the stop proceeds.
+- **Identity** comes from `PARTNER_ID`, which `run.sh`/`run.cmd` export into the tab, so the hook resolves the same agent the wrappers do rather than assuming it is the session.
+
 ## Convergence
 
 There is no mechanical round limit, because no supervising process exists to enforce one. The briefing asks each agent to stop after two exchanges with no movement, state the disagreement fairly, and let the human decide.
@@ -196,7 +210,9 @@ That is the right place for the rule. A deadlock between two models is a genuine
 
 **An agent talking to itself.** `read` and `wait` filter out messages the reader sent (`m["from"] != who`), so an agent cannot trigger its own next round — including the session agent's background `wait`.
 
-**The session agent idle while the human works in a tab.** It had no background `wait` armed, so nothing re-invoked it when a partner addressed `@all`. Its briefing arms one at the end of every turn; if it stopped, the next human turn in the main session re-arms it (step 4). Check `.partner/p1/lastseen` — a fresh stamp means the background `wait` is running.
+**The session agent idle while the human works in a tab.** It had no background `wait` armed, so nothing re-invoked it when a partner addressed `@all`. Its briefing arms one at the end of every turn; if it stopped, the next human turn in the main session re-arms it, and the Stop hook blocks it from ending a turn with an unanswered message in the meantime. Check `.partner/<id>/lastseen` — a fresh stamp means the background `wait` is running.
+
+**The Stop hook never fires.** It needs `bash` and Python on `PATH`, and `hooks.json` is read once at session start — a session already open when the plugin was installed will not have it. Restart. `partner.py hook-stop < /dev/null` from the repo root should print nothing and exit 0.
 
 **Advisors only ever reply to the baton holder.** They should also debate each other — `send --to p3`, not just `--to @all` — and hand the holder a joint view. If the transcript is all spokes to one hub, the briefing's "you advise, and you discuss" step is being skipped; `send` one of them a direct question to seed it.
 

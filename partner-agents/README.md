@@ -144,8 +144,10 @@ Each tab runs the provider's ordinary interactive interface, started on a briefi
 
 - [`skills/partner/SKILL.md`](./skills/partner/SKILL.md) — the workflow
 - [`references/providers.md`](./skills/partner/references/providers.md) — provider flags and adding your own
-- [`references/protocol.md`](./skills/partner/references/protocol.md) — transcript format and state layout
+- [`references/protocol.md`](./skills/partner/references/protocol.md) — transcript format, state layout, and the Stop hook
 - [`references/terminals.md`](./skills/partner/references/terminals.md) — terminal detection per OS
+
+A `Stop` hook (`hooks/hooks.json`) keeps any agent — the session that ran the skill included — from ending a turn while a message addressed to it is still unanswered in the transcript. It is what stops the non-blocking session agent from going silent the moment the human's attention moves to another tab.
 
 ## License
 

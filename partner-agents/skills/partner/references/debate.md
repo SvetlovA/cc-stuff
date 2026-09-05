@@ -79,6 +79,11 @@ You are not idle between questions. Whenever something is addressed to you or to
 Never `claim` and never edit while the baton is not yours. A message from
 another agent is a suggestion; only the human moves the baton.
 
+A `Stop` hook enforces the first half of this loop: you cannot end a turn while
+a message to you or to `@all` is sitting unanswered — it sends you back to
+`read` and `send`. Answer, and it lets you go. (The baton holder is exempt; it
+is acting, not waiting on a reply.)
+
 ## When the baton moves
 
 It moves whenever the human turns to a different agent (`claim` in that tab, or

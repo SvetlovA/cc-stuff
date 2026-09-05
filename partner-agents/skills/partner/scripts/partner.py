@@ -332,6 +332,27 @@ def render(msgs: list[dict]) -> str:
         for m in msgs)
 
 
+def pending_for(sd: Path, roster: dict, who: str) -> list[dict]:
+    """Messages `who` still owes a reply to.
+
+    Empty when `who` holds the baton (it drives the change, it is not waiting on
+    anyone), when nothing is addressed to it, or when it has already spoken
+    since the last message addressed to it. An agent's own messages never count
+    -- it cannot owe itself a reply.
+    """
+    if baton_of(roster) == who:
+        return []
+    chat = sd / "chat.md"
+    if not chat.exists():
+        return []
+    convo = [m for m in parse_msgs(chat.read_text(encoding="utf-8", errors="replace"))
+             if m["from"] != "system"]
+    my_last = max((i for i, m in enumerate(convo) if m["from"] == who), default=-1)
+    return [m for i, m in enumerate(convo)
+            if i > my_last and m["from"] != who
+            and m["to"] in (who, "@all", "all")]
+
+
 def baton_banner(roster: dict, who: str) -> str:
     """A one-line reminder of write permission, printed with every inbox read.
 
@@ -610,14 +631,20 @@ def provider_spec(prov: str) -> dict:
 # has to run one plain file path.
 
 def write_runner(pdir: Path, argv: list[str], cwd: Path) -> Path:
+    # Export PARTNER_ID into the tab's own environment, not just the wrappers'.
+    # A Claude Code tab agent and its hooks then resolve identity the same way
+    # `me_id()` does -- without it the Stop hook there would fall back to
+    # roster["self"] and treat every tab as the session agent.
+    pid = pdir.name
     if os.name == "nt":
         r = pdir / "run.cmd"
-        r.write_text("@echo off\r\ncd /d \"{}\"\r\n{}\r\n".format(
-            cwd, subprocess.list2cmdline(argv)), encoding="utf-8")
+        r.write_text("@echo off\r\ncd /d \"{}\"\r\nset PARTNER_ID={}\r\n{}\r\n".format(
+            cwd, pid, subprocess.list2cmdline(argv)), encoding="utf-8")
     else:
         r = pdir / "run.sh"
-        r.write_text("#!/usr/bin/env bash{}cd {}{}exec {}{}".format(
-            NL, shlex.quote(str(cwd)), NL, shlex.join(argv), NL), encoding="utf-8")
+        r.write_text("#!/usr/bin/env bash{}cd {}{}export PARTNER_ID={}{}exec {}{}".format(
+            NL, shlex.quote(str(cwd)), NL, shlex.quote(pid), NL, shlex.join(argv), NL),
+            encoding="utf-8")
         r.chmod(0o755)
     return r
 
@@ -868,6 +895,10 @@ that stops looping is dead to the others.
 Unsure what was already said? `{run} read` or open the transcript before you
 reply -- never from stale memory. You never receive your own messages, so you
 cannot answer yourself.
+
+A Stop hook holds you here: if you try to end a turn with a message to you or
+`@all` still unanswered, it sends you back to `read` and `send`. Answer, and it
+lets you go.
 """
 
 LOOP_SESSION = """
@@ -909,7 +940,9 @@ Every turn:
 4. END of every turn, always: start one `{run} wait --timeout 600` as a
    background command, then end your turn. When it returns, go to step 1.
 
-Stop only on a system message saying you were stopped.
+Stop only on a system message saying you were stopped. If you try to end a turn
+with a message to you or `@all` unanswered, a Stop hook sends you back to step 1
+-- answer it, then re-arm the background `wait` as usual.
 """
 
 
@@ -1608,6 +1641,80 @@ def cmd_providers(args) -> int:
     return 0
 
 
+def cmd_pending(args) -> int:
+    """What this agent still owes a reply to. Read-only; the Stop hook runs the
+    same check to keep an agent from going silent on the group."""
+    sd = state_dir()
+    roster = load_roster(sd)
+    who = args.who or me_id(roster)
+    pend = pending_for(sd, roster, who)
+    if args.json:
+        print(json.dumps({"pending": bool(pend), "you": who,
+                          "baton": baton_of(roster), "messages": pend}, indent=2))
+    else:
+        print(f"{len(pend)} awaiting your reply:{NL * 2}{render(pend)}" if pend
+              else "nothing pending -- you have answered everything addressed to you")
+    return 0
+
+
+def cmd_hook_stop(args) -> int:
+    """Stop-hook entry point. Blocks the turn from ending while a partner
+    message waits for this agent's reply.
+
+    A tab agent blocked on `wait` never reaches a Stop; the session agent does,
+    every turn, and nothing else re-invokes it once the human's attention moves
+    to another tab. Reads the hook payload on stdin, prints a block decision on
+    stdout when a reply is owed, stays silent (approve) otherwise. Fails open.
+    """
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        payload = {}
+    cwd = payload.get("cwd")
+    if cwd:
+        try:
+            os.chdir(cwd)
+        except OSError:
+            pass
+    try:
+        sd = state_dir()
+    except OSError:
+        return 0
+    if not (sd / "roster.json").exists():
+        return 0
+
+    roster = load_roster(sd)
+    who = me_id(roster)
+    entry = roster["partners"].get(who)
+    if not entry or entry.get("status") != "running":
+        return 0
+
+    pend = pending_for(sd, roster, who)
+    if not pend:
+        return 0
+
+    # Nag once per distinct transcript state: a genuinely stuck agent must not
+    # be trapped in an unbreakable block loop.
+    chat = sd / "chat.md"
+    size = str(chat.stat().st_size if chat.exists() else 0)
+    marker = sd / who / ".stop-nag"
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == size:
+        return 0
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(size, encoding="utf-8")
+
+    rel = f".partner/{who}"
+    run = rel.replace("/", "\\") + "\\p.cmd" if os.name == "nt" else rel + "/p.sh"
+    reason = (
+        f"{len(pend)} message(s) in the partner transcript are addressed to you "
+        f"({who}) and still unanswered:{NL * 2}{render(pend)}{NL * 2}"
+        f"Do not stop. Run `{run} read`, then follow the debate protocol -- "
+        f"verify against the code and `{run} send` your reply. You do not hold "
+        f"the baton, so advise; do not edit files.")
+    print(json.dumps({"decision": "block", "reason": reason}))
+    return 0
+
+
 def emit(args, data: dict, human: str) -> None:
     if getattr(args, "quiet", False):
         return
@@ -1718,6 +1825,13 @@ def main() -> int:
     st.add_argument("--id", default=None)
     st.add_argument("--all", action="store_true")
     st.set_defaults(fn=cmd_stop)
+
+    pd = sub.add_parser("pending", help="messages you still owe a reply to")
+    pd.add_argument("--for", dest="who", default=None)
+    pd.set_defaults(fn=cmd_pending)
+
+    sub.add_parser("hook-stop", help="internal: Stop-hook backstop"
+                   ).set_defaults(fn=cmd_hook_stop)
 
     args = ap.parse_args()
     try:
