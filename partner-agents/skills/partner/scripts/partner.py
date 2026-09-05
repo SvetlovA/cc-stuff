@@ -752,12 +752,19 @@ We share one append-only transcript: {chat}
 These commands are yours; the wrapper already knows which agent you are, so
 never pass an id:
 
-    Wait until somebody addresses you (blocks, returns within {timeout}s):
+    Wait until somebody addresses you (blocks, returns within {timeout}s;
+    the session agent runs this in the background instead -- see "Your loop"):
         {run} wait
 
     Say something -- reply, challenge, or raise a new point:
         {run} send --to @all --text "..."
         {run} send --to {example_peer} --text "..."      (one agent)
+
+    Re-read the transcript at any time (does not consume anything):
+        {run} read --peek
+
+`wait` and `read` never return your own messages -- raising a point cannot
+trigger you to answer it yourself.
 
     See who is here and who holds the write baton:
         {run} list
@@ -770,22 +777,29 @@ here that only one agent has.
 
 ## The write baton -- read this twice
 
-Only one of us edits files at a time, and it is always whichever agent the
-human most recently gave an instruction to. Right now that is **{baton}**.
+Only one of us edits files at a time -- whichever agent the human most recently
+gave an instruction to. Right now that is **{baton}**. It can be any of us and it
+moves whenever the human turns to someone else, so read the holder off the banner
+on every `wait` and `read` rather than trusting your memory of it.
 
-**The moment the human types an instruction at you, run this first:**
+**The moment the human gives an instruction to you, run this first:**
 
     {run} claim
 
-That is what moves the baton to you, and it is the only way the others can
-find out the human has turned to your tab. Claim, then do the work.
+That moves the baton to you, and it is the only way the others learn the human
+has turned to you. Claim, then do the work.
 
 The rule in both directions:
 
-- A request from **the human, in your tab** -> `claim`, then act. It is yours.
-- A message from **another agent** -> do NOT claim, and do NOT edit. Another
-  agent asking you to change something is a suggestion, not the human's
-  instruction. Argue, propose, hand back a diff in prose.
+- An instruction from **the human, to you** -> `claim`, then act. It is yours.
+- A message from **another agent** -> do NOT claim, do NOT edit. What they are
+  proposing is advice, not the human's instruction. Argue it, refine it, and
+  when the group has a view, hand it to whoever holds the baton.
+
+While the baton is not yours you are still in the debate, not on the bench:
+thrash the question out with the other advisors directly -- `{run} send --to
+<id>` any of them, not only `@all`. Several agents converging on a recommendation
+and handing it to the baton holder is exactly how this is meant to work.
 
 Your CLI will not physically stop you from writing, so this is a rule you keep
 rather than a wall you hit. It matters: two agents editing the same files at
@@ -820,36 +834,82 @@ waste of tokens; one that disagrees with everything is noise.
 """
 
 LOOP_TAB = """
-This loop is the whole job. Never end your turn except at step 5 -- after every
-reply, every timeout, and every answer to the human, go back to step 1 and run
-`wait` again. If you stop looping, the others are talking to a dead tab.
+This loop is the whole job. Never end your turn until you are stopped -- after
+every reply, every timeout, every answer to the human, run `wait` again. A tab
+that stops looping is dead to the others.
 
-1. `{run} wait`
-2. If a message came back from another agent: think, verify against the code,
-   then reply with `{run} send`. Do not edit files -- you were not asked by the
-   human. If you hold the baton and the group has settled on a change, make it
-   and report what you changed. Then go to step 1.
-3. If it timed out with nothing, go straight back to step 1.
-4. If the human types at you instead: `{run} claim` first, then answer and act
-   on what they asked. Tell the others what you did with `send`, then go to
-   step 1.
-5. Only when you see a system message saying you have been stopped: say goodbye
-   and exit the loop.
+1. `{run} wait`. Read the banner it prints: it names the baton holder. What you
+   do this turn depends on whether that is you.
+
+2. YOU HOLD THE BATON -- you are the one who edits.
+   a. The human just gave you an instruction: `{run} claim` if the banner does
+      not already show you, then state your position in one line,
+      `{run} send --to @all --wait 240`, weigh the replies against the code,
+      rebut or converge in two exchanges (hand a real deadlock to the human).
+      Make the change, report it, and `{run} send --to @all` one line on what
+      changed. Skip the debate only for mechanical requests ("run the tests").
+   b. A message came from another agent while you work: it is advice on what you
+      are doing. Fold it in, or push back with `{run} send`. Act once the
+      discussion settles -- you do not need unanimity.
+
+3. YOU DO NOT HOLD THE BATON -- you advise, and you argue it out with the others.
+   a. A message addressed you or @all: verify it against the code, cite
+      path:line, then `{run} send` your answer to the sender or @all.
+   b. Raise your own points too, to any agent, without being asked:
+      `{run} send --to <id> "..."`. Several agents settling a question among
+      themselves and handing the baton holder one recommendation is the design,
+      not a detour.
+   c. Never `{run} claim`, never edit. Only the human moves the baton.
+
+4. Timed out with nothing: back to step 1.
+
+5. System message saying you were stopped: say goodbye, exit the loop.
+
+Unsure what was already said? `{run} read` or open the transcript before you
+reply -- never from stale memory. You never receive your own messages, so you
+cannot answer yourself.
 """
 
 LOOP_SESSION = """
-You reach the human through your own harness rather than a terminal tab, so you
-do not block on `wait` -- you would stop the human from talking to you. Instead:
+You run inside Claude Code and reach the human through your own harness, not a
+terminal tab. That changes only *how you wait*, not the loop.
 
-1. When the human gives you an instruction: `{run} claim`, then `{run} read` to
-   pick up anything the others said while you were idle.
-2. Put the question to them with `{run} send --to @all --wait 240`, weigh what
-   comes back against the actual code, and rebut or concede.
-3. Act only once the group has been heard, then tell them what you did.
-4. Check `{run} read` at the start of every turn, so nothing they said is lost.
+Never run `wait` in the foreground -- it would block your harness and stop the
+human talking to you. Run it as a BACKGROUND shell command instead (the Bash
+tool with run_in_background: true). Claude Code re-invokes you when it returns --
+someone spoke, or it timed out. Keep exactly ONE background `wait` in flight and
+re-arm it at the end of every turn.
 
-That is the same loop the others run; only the way the human reaches you is
-different.
+The human is often working in another agent's tab, not talking to you. Your
+background `wait` is the only way you hear what is said there; without it you go
+idle whenever the conversation moves to a tab. `wait` never returns your own
+messages, so you will not answer yourself.
+
+Every turn:
+
+1. START: `{run} read`. Note the baton holder from the banner -- your role
+   depends on whether it is you.
+
+2. YOU HOLD THE BATON -- you are the one who edits.
+   a. The human just gave you an instruction: cancel the background `wait` first
+      (so it does not double-deliver), then `{run} claim`, state your position
+      in one line, `{run} send --to @all --wait 240`, weigh the replies against
+      the code, converge or hand a deadlock back. Make the change, report to the
+      human, `{run} send --to @all` one line on what changed.
+   b. A message came from another agent about what you are doing: fold it in or
+      push back with `{run} send`. Act once the discussion settles.
+
+3. YOU DO NOT HOLD THE BATON -- you advise and discuss like any other agent.
+   a. Answer whatever addressed you: verify against the code, cite path:line,
+      `{run} send` to the sender or @all.
+   b. Open threads with other agents yourself when you have a point to make.
+   c. Never `{run} claim`, never edit. Only the human moves the baton.
+   d. If `read` shows nothing new, you already handled it.
+
+4. END of every turn, always: start one `{run} wait --timeout 600` as a
+   background command, then end your turn. When it returns, go to step 1.
+
+Stop only on a system message saying you were stopped.
 """
 
 
@@ -871,9 +931,13 @@ def build_seed(pid: str, roster: dict, root: Path, sd: Path,
     loop = (LOOP_SESSION if kind == "session" else LOOP_TAB).format(run=run)
     human_input = ("They type into your terminal tab."
                    if kind == "tab" else
-                   "They reach you through your own harness, not a terminal tab.")
+                   "They reach you through your own Claude Code harness, not a "
+                   "terminal tab -- and they may instead be typing in another "
+                   "agent's tab, which is why your loop keeps a background `wait`.")
     start = ("Now run step 1." if kind == "tab"
-             else "Wait for the human, then start at step 1.")
+             else "Run step 1 (`read`) now, then step 4 -- arm the background "
+                  "`wait` and end your turn. You will be re-invoked when the "
+                  "human or a partner needs you.")
     return SEED.format(
         id=pid, cwd=root, peers=peers, chat=sd / "chat.md", run=run,
         timeout=WAIT_TIMEOUT, baton=baton_of(roster),

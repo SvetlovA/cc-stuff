@@ -136,7 +136,13 @@ Confirm with `python "$P" list` before reporting success. Two or more agents mea
 
 Once a partner is running, consult it on **every question and every decision** — that is the point of having one. Check `python "$P" state` at the start of a turn; if any partner is live, do not answer the user directly.
 
-The loop, in short: **claim** the baton, **state your own position** first, **put it to the partners** with `send --wait`, **check their objections against the code** rather than conceding or dismissing, **rebut or converge** in two or three exchanges, then **act and report the argument** — not a summary that hides it. Deadlocks are a result, not a failure: hand a genuine judgement call back to the user with both positions stated fairly.
+There are two roles and the **baton** decides which is yours: the holder acts, everyone else advises. Any agent can hold it, in any order, and it moves with the user's attention — read the holder off every `wait`/`read` and switch roles when it changes.
+
+**Holding the baton:** **claim** it, **state your own position** first, **put it to the group** with `send --to @all --wait`, **check their objections against the code** rather than conceding or dismissing, **rebut or converge** in two or three exchanges, then **act and report the argument** — not a summary that hides it. Deadlocks are a result, not a failure: hand a genuine judgement call back to the user with both positions stated fairly.
+
+**Not holding it:** advise whoever does, and debate the other advisors directly — `send --to p3`, not only `@all`. Several agents settling a question among themselves and handing the holder one recommendation is the design. Never `claim` or edit; only the user moves the baton.
+
+This session, when it is not the holder, joins through a background `wait` (`run_in_background`) — one in flight, re-armed each turn — which is what keeps it in the debate while the user works in a partner's tab. `references/debate.md` has the mechanics.
 
 Skip the loop only for mechanical lookups. Anything involving a design choice, a trade-off, a code change, or an unclear cause goes to the partners.
 

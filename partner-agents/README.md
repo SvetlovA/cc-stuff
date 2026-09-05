@@ -138,6 +138,8 @@ cannot start this partner:
 
 Each tab runs the provider's ordinary interactive interface, started on a briefing that tells it to loop: block on `wait` until somebody addresses it, think, reply, repeat. Nothing runs headlessly and nothing supervises the agents, so there are no session ids to track and no output formats to parse — which is why any CLI that can run shell commands can join with a one-line template.
 
+`p1` — the session the skill was invoked in — can't block in the foreground without cutting off the human who talks to it through that same session. It runs the identical loop with `wait` as a background command instead, re-armed at the end of every turn, so it stays in the debate even while the human is working in a partner's tab.
+
 ## Documentation
 
 - [`skills/partner/SKILL.md`](./skills/partner/SKILL.md) — the workflow

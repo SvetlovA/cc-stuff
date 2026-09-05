@@ -164,16 +164,16 @@ Any agent can run any of these, `spawn` included. `.partner/p.sh` (no id) is the
 
 `wait` is what makes an interactive session autonomous. It polls the transcript and blocks until a message arrives for that agent, so the agent has something to answer rather than needing to be driven. It always returns within `--timeout` (default 120s) even when nothing arrives, which matters twice over: the tab never looks wedged, and the human can interrupt and type instead.
 
-The briefing tells each agent to loop — `wait`, think, `send`, repeat — and to answer the human directly whenever they type into its tab, then resume.
+The briefing tells each agent to loop — `wait`, think, `send`, repeat — and what it does on each pass turns on whether it holds the baton. The holder runs the debate and makes the change (state a position, `send --to @all --wait`, weigh the replies, act). Everyone else advises — and not only in reply to the holder: any non-holder can open a thread with any other, `send --to p3` as readily as `--to @all`, so three or four agents can work a question out among themselves and hand the holder a joint recommendation. The baton moves with the human's attention; each `wait` and `read` reprints the holder, and an agent switches roles the moment it changes.
 
-The one agent that does **not** block on `wait` is the session someone typed the skill into: it reaches the human through its own harness, and blocking would stop them talking to it. Its briefing gives it the same loop with `read` at the start of each turn in place of the block. That is the only difference between any two agents here, and it comes from how the human reaches them, not from rank.
+The one agent that does **not** block on `wait` is the session someone typed the skill into. It reaches the human through its own Claude Code harness, and a foreground block would stop them talking to it — so its briefing has it run `wait` as a **background** command instead. Claude Code re-invokes it when that returns (a partner spoke, or it timed out), which is what keeps it in the debate even while the human is working in another agent's tab. Without this it would sit idle any time the conversation moved to a tab — participating only when addressed in its own session. It keeps exactly one background `wait` in flight and re-arms it at the end of every turn. That is the only difference between any two agents here, and it comes from how the human reaches them, not from rank.
 
 ## What an agent is launched with
 
 `.partner/<id>/seed.md` contains:
 
 1. **Who it is** and who its partners are, stated as equals with nobody in charge.
-2. **That a human may type into its tab at any time**, and that it should answer them and then resume looping.
+2. **That a human may address it at any time** (in its tab, or — for the session agent — through its own harness); when they do it holds the baton and runs the debate before acting, and the rest of the time it advises whoever holds it and argues with the other advisors. Then it resumes looping.
 3. **The commands** for `wait`, `send` and `list`, using the short wrapper.
 4. **The baton rule** — `claim` when the human addresses it, never when another agent does — with the reason: concurrent edits produce conflicts nobody can see.
 5. **How to argue well** — lead with a position, disagreement needs a concrete alternative, verify against the code, cite `path:line`, stop after two exchanges without movement.
@@ -194,7 +194,11 @@ That is the right place for the rule. A deadlock between two models is a genuine
 
 **An agent reopening a settled question.** It joined without the history, or `--context` never said the question was closed. Check `.partner/<id>/handoff.md`.
 
-**An agent talking to itself.** `read` and `wait` filter out messages the reader sent, so an agent cannot trigger its own next round.
+**An agent talking to itself.** `read` and `wait` filter out messages the reader sent (`m["from"] != who`), so an agent cannot trigger its own next round — including the session agent's background `wait`.
+
+**The session agent idle while the human works in a tab.** It had no background `wait` armed, so nothing re-invoked it when a partner addressed `@all`. Its briefing arms one at the end of every turn; if it stopped, the next human turn in the main session re-arms it (step 4). Check `.partner/p1/lastseen` — a fresh stamp means the background `wait` is running.
+
+**Advisors only ever reply to the baton holder.** They should also debate each other — `send --to p3`, not just `--to @all` — and hand the holder a joint view. If the transcript is all spokes to one hub, the briefing's "you advise, and you discuss" step is being skipped; `send` one of them a direct question to seed it.
 
 **The baton drifting away from the human.** An agent claimed after being asked by another agent rather than by the human. Its briefing forbids this; check the transcript for the `system` message naming who claimed and when.
 

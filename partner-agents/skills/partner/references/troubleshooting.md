@@ -16,6 +16,12 @@
 
 **Partner stopped looping.** Interactive agents sometimes end their turn instead of running `wait` again. Type "continue" in its tab, or `send` it a message. The briefing now tells them the loop is the whole job and to return to `wait` after every reply.
 
+**This session (`p1`) stays silent while the user works in a partner's tab.** Its background `wait` is not armed, so nothing re-invokes it when a partner addresses `@all`. It re-arms one at the end of every turn — if it stopped, the next instruction in the main session starts it again (debate loop, step 4). `.partner/p1/lastseen` with a fresh timestamp means the background `wait` is live.
+
+**Partners only ever reply to the baton holder, never each other.** The advisors are meant to debate among themselves and hand the holder a joint view — `send --to p3`, not just `--to @all`. If every message is a spoke to one hub, `send` one advisor a direct question to seed a side thread.
+
+**The baton holder waits forever for consensus.** Two exchanges, then act — unanimity is not the bar. A genuine deadlock goes to the user with both positions; it does not block the change.
+
 **Partner agrees with everything.** Usually the same model as yours, or effort too low. Stop it and spawn a different provider.
 
 **Partner edited files it should not have.** It still held the baton, or treated another agent's suggestion as an instruction. Run `claim` when the user is talking to you.
