@@ -184,15 +184,21 @@ The starting prompt passed on the command line only says "read `seed.md` and fol
 
 ## The Stop hook
 
-`hooks/hooks.json` registers a `Stop` hook — `partner.py hook-stop` — that runs each time any agent's turn ends. It blocks the stop when a message in `chat.md` is addressed to that agent (by id or `@all`), arrived after the agent last spoke, and has no reply yet: the agent is told to `read` and `send` before it can stop.
+`hooks/hooks.json` registers a `Stop` hook — `partner.py hook-stop` — that runs each time any agent's turn ends. It makes two checks, in order.
 
-This is the deterministic floor under the loop, and it matters most for the session agent. A tab agent sits blocked inside a foreground `wait`, so it always has the next message in hand; the session agent does not block, and if its background `wait` is not running — never armed, or dropped after a timeout — nothing else brings it back to the transcript. The hook guarantees that whenever it *is* running, it cannot end a turn while a question to it is still open.
+**1. Unanswered messages.** Blocks when a message in `chat.md` is addressed to that agent (by id or `@all`), arrived after the agent last spoke, and has no reply yet: the agent is told to `read` and `send` before it can stop.
+
+**2. A session agent that is not listening.** Blocks when the agent is the `kind: "session"` one and `<id>/lastseen` is missing or older than `LIVE_WINDOW`. `wait` re-stamps `lastseen` every few seconds while it polls, so a stale stamp is direct evidence that no background `wait` is in flight. The agent is told to `read`, then arm one.
+
+Check 2 is what catches the failure the whole background-`wait` design is exposed to: the session spawns a partner, reports success, and ends the turn without ever entering the loop. `.partner/p1/lastseen` never gets written, nothing re-invokes the session, and the human — now typing in the partner's tab — has an agent that never speaks. Check 1 cannot catch it, because at that moment nothing has been said *to* p1 yet; by the time the partner does speak, the session is already unreachable.
+
+A tab agent sits blocked inside a foreground `wait`, so it always has the next message in hand and only check 1 applies to it.
 
 Details that keep it from getting in the way:
 
 - **The baton holder is exempt.** It drives the change; it is not waiting on anyone. `pending_for` returns nothing for it.
 - **Own messages never count** — an agent cannot owe itself a reply (`m["from"] != who`).
-- **It nags once per new message.** The marker `.partner/<id>/.stop-nag` holds the transcript size at the last block; an identical size means "already told them", so a genuinely stuck agent is never wedged in an unbreakable loop.
+- **It nags at a bounded rate.** `.partner/<id>/.stop-nag` holds the transcript size at the last message block — an identical size means "already told them". `.stop-nag-live` throttles the listener warning to once every 120s, since that one is not tied to a new message. A genuinely stuck agent is never wedged in an unbreakable loop.
 - **It fails open.** No Python, no `.partner/`, or an unregistered/stopped agent — the stop proceeds.
 - **Identity** comes from `PARTNER_ID`, which `run.sh`/`run.cmd` export into the tab, so the hook resolves the same agent the wrappers do rather than assuming it is the session.
 

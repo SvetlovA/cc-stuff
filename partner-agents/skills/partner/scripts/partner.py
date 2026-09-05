@@ -1361,6 +1361,28 @@ def touch_seen(sd: Path, pid: str) -> None:
         pass                # a heartbeat is never worth failing a command over
 
 
+def _nag_throttled(marker: Path, window: int) -> bool:
+    """True when `marker` was stamped within `window` seconds.
+
+    The Stop hook uses this for warnings that are not tied to a new message, so
+    an agent that cannot act on one is told at a bounded rate rather than being
+    walled in by a block it can never clear.
+    """
+    now = time.time()
+    try:
+        if marker.exists() and now - float(
+                marker.read_text(encoding="utf-8").strip()) < window:
+            return True
+    except (OSError, ValueError):
+        pass
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(now), encoding="utf-8")
+    except OSError:
+        pass
+    return False
+
+
 def last_seen(sd: Path, pid: str) -> str | None:
     f = sd / pid / "lastseen"
     if not f.exists():
@@ -1689,28 +1711,53 @@ def cmd_hook_stop(args) -> int:
     if not entry or entry.get("status") != "running":
         return 0
 
-    pend = pending_for(sd, roster, who)
-    if not pend:
-        return 0
-
-    # Nag once per distinct transcript state: a genuinely stuck agent must not
-    # be trapped in an unbreakable block loop.
-    chat = sd / "chat.md"
-    size = str(chat.stat().st_size if chat.exists() else 0)
-    marker = sd / who / ".stop-nag"
-    if marker.exists() and marker.read_text(encoding="utf-8").strip() == size:
-        return 0
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(size, encoding="utf-8")
-
     rel = f".partner/{who}"
     run = rel.replace("/", "\\") + "\\p.cmd" if os.name == "nt" else rel + "/p.sh"
+
+    # 1. Something is addressed to this agent and it has not answered.
+    pend = pending_for(sd, roster, who)
+    if pend:
+        # Nag once per distinct transcript state: a genuinely stuck agent must
+        # not be trapped in an unbreakable block loop.
+        chat = sd / "chat.md"
+        size = str(chat.stat().st_size if chat.exists() else 0)
+        marker = sd / who / ".stop-nag"
+        if marker.exists() and marker.read_text(encoding="utf-8").strip() == size:
+            return 0
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(size, encoding="utf-8")
+        reason = (
+            f"{len(pend)} message(s) in the partner transcript are addressed to "
+            f"you ({who}) and still unanswered:{NL * 2}{render(pend)}{NL * 2}"
+            f"Do not stop. Run `{run} read`, then follow the debate protocol -- "
+            f"verify against the code and `{run} send` your reply. You do not "
+            f"hold the baton, so advise; do not edit files.")
+        print(json.dumps({"decision": "block", "reason": reason}))
+        return 0
+
+    # 2. Nothing is waiting -- but if this is the session agent and its
+    # background `wait` is not running, nothing will ever tell it that something
+    # is. `wait` re-stamps lastseen every few seconds while it polls, so a stamp
+    # older than the live window means the listener is gone and this session is
+    # about to go deaf. That is the failure that leaves a spawning session idle
+    # while the human works in the partner's tab.
+    if (entry.get("kind") or "tab") != "session":
+        return 0
+    age = _age_seconds(last_seen(sd, who))
+    if age is not None and age <= LIVE_WINDOW:
+        return 0
+    if _nag_throttled(sd / who / ".stop-nag-live", 120):
+        return 0
+    how_stale = "has never been stamped" if age is None else f"is {int(age)}s old"
     reason = (
-        f"{len(pend)} message(s) in the partner transcript are addressed to you "
-        f"({who}) and still unanswered:{NL * 2}{render(pend)}{NL * 2}"
-        f"Do not stop. Run `{run} read`, then follow the debate protocol -- "
-        f"verify against the code and `{run} send` your reply. You do not hold "
-        f"the baton, so advise; do not edit files.")
+        f"You are the session agent ({who}) in a running partner session, but "
+        f"your background `wait` is not running -- `{rel}/lastseen` {how_stale}. "
+        f"Nothing re-invokes this session on its own, so you would go silent the "
+        f"moment the human works in a partner's tab.{NL * 2}"
+        f"Before ending the turn: run `{run} read` and answer anything it shows, "
+        f"then start `{run} wait --timeout 600` as a BACKGROUND command "
+        f"(run_in_background: true) -- never in the foreground, it would block "
+        f"the human out of this session.")
     print(json.dumps({"decision": "block", "reason": reason}))
     return 0
 

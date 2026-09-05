@@ -1,6 +1,6 @@
 {
   "name": "partner-agents",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Run several AI agents (Claude, Codex, Gemini, or any CLI) as equal partners, each in its own terminal tab, debating every decision through a shared transcript with an exclusive write baton.",
   "author": {
     "name": "SvetlovA",

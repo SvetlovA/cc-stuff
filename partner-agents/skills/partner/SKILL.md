@@ -132,6 +132,21 @@ The tab runs the provider's normal interface on a briefing that tells it to loop
 
 Confirm with `python "$P" list` before reporting success. Two or more agents means it worked; only yourself means the spawn never happened — say that plainly rather than describing what was set up.
 
+### Step 4 — Enter the loop yourself, before ending the turn
+
+**Spawning a partner is not the end of the task.** The partner blocks on `wait` in its tab, so it hears everything. This session does not block, and nothing re-invokes it on its own — so unless it arms a listener now, it drops out of the debate the moment the user starts typing in the partner's tab, and the partner argues with nobody.
+
+Two commands, always, as the last thing in this turn:
+
+```bash
+python "$P" read                     # 1. pick up anything already said
+python "$P" wait --timeout 600       # 2. run this as a BACKGROUND command
+```
+
+The second must be **backgrounded** (the Bash tool with `run_in_background: true`) — in the foreground it blocks the harness and the user cannot talk to this session. Claude Code re-invokes this session when it returns, which is the whole mechanism: one background `wait` in flight, re-armed at the end of every turn thereafter.
+
+`.partner/<id>/lastseen` is the proof it is running — the stamp refreshes every few seconds while `wait` polls. Missing or minutes old means this session is deaf, whatever the roster claims.
+
 ## The debate protocol
 
 Once a partner is running, consult it on **every question and every decision** — that is the point of having one. Check `python "$P" state` at the start of a turn; if any partner is live, do not answer the user directly.
