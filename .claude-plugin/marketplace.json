@@ -7,7 +7,7 @@
     {
       "name": "partner-agents",
       "source": "./partner-agents",
-      "description": "Spawn peer AI agents (Claude, Codex, Gemini, or any CLI) in new terminal tabs that debate every decision with you through a shared transcript, with an exclusive write baton"
+      "description": "Run AI agents (Claude, Codex, Gemini, or any CLI) as equal partners in their own terminal tabs — Orca-aware — debating every decision through a shared transcript, with a write baton that follows whoever you are talking to"
     },
     {
       "name": "pr-review-toolkit",

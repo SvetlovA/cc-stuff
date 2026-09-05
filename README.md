@@ -6,7 +6,7 @@ A public collection of Claude Code plugins for developer workflows. Install any 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs, debating every decision with you, with an exclusive write baton | 0.2.0 |
+| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 0.3.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.6.1 |
 
 ## Installing a Plugin
@@ -34,6 +34,8 @@ Runs several AI agents as equal partners, each in its own terminal tab, so decis
 - Opens a real tab on **Windows, macOS, and Linux** (Windows Terminal, iTerm2, Terminal.app, GNOME Terminal, Konsole, WezTerm, kitty, tmux, zellij), and prints a manual command when there is no terminal
 - Every agent is a **full interactive session** — interrupt any tab and type at that partner directly; it answers you, then resumes debating
 - Starts partners with **permission prompting relaxed** (`--auto ask|edits|full`) so nobody is answering dialogs in three tabs at once
+- Opens partners as **Orca tabs** in the current worktree when running inside Orca, and falls back to the platform terminal everywhere else
+- **Validates before spawning**: CLI installed and runnable, effort level accepted by that provider, model recognised — each failure reported with its fix
 - Passes a **handoff briefing** so the partner joins mid-work already knowing what was decided and what is open
 - Puts **every question and decision** to the partners, weighs the pushback against the code, and reports the disagreement instead of hiding it
 - Keeps a **write baton** that follows your attention: type into a tab and that agent claims it, so only the partner you just spoke to edits files — one partner telling another to change something does not move it

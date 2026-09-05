@@ -7,6 +7,8 @@ A partner is a **separate process** with its own provider, model, and context �
 ## What it does
 
 - **Spawns partners into real terminal tabs** on Windows, macOS, and Linux — Windows Terminal, iTerm2, Terminal.app, GNOME Terminal, Konsole, WezTerm, kitty, tmux, and zellij are all detected automatically.
+- **Native Orca support.** Running inside [Orca](https://orca.computer)? Partners open as Orca tabs in the current worktree, beside the session that spawned them — not in a detached OS window. Detected automatically, with the normal terminal flow as fallback.
+- **Tells you before it fails.** Checks the CLI is installed and actually runs, the effort level is one that provider accepts, and the model is one it knows — each problem reported with the command that fixes it, before a tab is opened.
 - **Every partner is a full interactive session.** Walk into any tab and type at that agent directly — it answers you, then goes back to debating. Between your interruptions it drives itself.
 - **No permission dialogs to babysit.** Partners start with prompting relaxed (`--auto ask | edits | full`), so you are not approving edits in three tabs at once.
 - **Joins mid-work with the context intact.** Spawn a partner twenty exchanges into a hard problem and it arrives knowing the branch, the uncommitted diff, and the argument so far — plus whatever briefing you write. Each partner keeps its own, so adding a third never overwrites what the second was told.
@@ -35,6 +37,7 @@ cc --plugin-dir ./cc-stuff/partner-agents
 /partner                              # asks which provider, model, and effort
 /partner codex gpt-5-codex high       # or say it up front
 /partner list                         # who is running, who holds the baton
+/partner check codex gpt-5-codex high # validate without starting anything
 /partner baton p2                     # hand editing to p2 deliberately
 /partner stop --all
 ```
@@ -65,6 +68,17 @@ Anything else works through a one-line template:
 - A git repository — `.partner/` is anchored at the repo root and auto-excluded via `.git/info/exclude`.
 
 A terminal is *not* required. Without one, partners still run; the skill prints the command to start each in a tab you open yourself.
+
+## Validating before you spawn
+
+```
+$ partner.py check --provider codex --effort max
+cannot start this partner:
+  - effort 'max' is not supported by codex. Use one of: high, low, medium.
+    ('max' is this skill's own level; use 'high' for a real flag.)
+```
+
+`spawn` runs the same checks and refuses rather than opening a tab that flashes an error and vanishes. Install and effort problems are hard failures; an unrecognised model is soft, since model names change faster than this plugin does — pass `--force` to use one anyway.
 
 ## How it works
 

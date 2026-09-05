@@ -8,12 +8,12 @@ The registry lives in `PROVIDERS` in `scripts/partner.py`.
 
 ## Built-in providers
 
-| Provider | Model flag | Effort | Starting prompt |
-|----------|-----------|--------|-----------------|
-| `claude` | `--model` | prompt hint | positional argument |
-| `codex` | `-m` | `-c model_reasoning_effort="..."` | positional argument |
-| `gemini` | `-m` | prompt hint | `-i` |
-| `custom` | `{model}` | `{effort}` | `{prompt}` |
+| Provider | Model flag | Effort | Accepts effort | Starting prompt | Install |
+|----------|-----------|--------|----------------|-----------------|---------|
+| `claude` | `--model` | prompt hint | low, medium, high, max | positional | `npm install -g @anthropic-ai/claude-code` |
+| `codex` | `-m` | `-c model_reasoning_effort="..."` | low, medium, high | positional | `npm install -g @openai/codex` |
+| `gemini` | `-m` | prompt hint | low, medium, high, max | `-i` | `npm install -g @google/gemini-cli` |
+| `custom` | `{model}` | `{effort}` | anything | `{prompt}` | yours |
 
 Run `python partner.py providers` to see which are installed on the current machine.
 
@@ -32,6 +32,27 @@ A partner sits in its own tab. A permission prompt there is easy to miss and sil
 **This is why the baton is a convention rather than a sandbox.** At `edits` or `full` every partner is technically able to write. The baton is enforced by every agent's briefing telling it to check `list` first, not by a flag. If you need hard enforcement more than you need an unattended partner, spawn with `--auto ask` — the CLI will then stop and ask before it writes anything.
 
 The claude and codex flags were verified against the installed CLIs; the gemini row follows its documented flags but is unverified here.
+
+## Validation
+
+`spawn` refuses to open a tab for a configuration that cannot work, and `check` runs the same rules without starting anything:
+
+```bash
+python partner.py check --provider codex --model gpt-5-codex --effort high
+```
+
+| Checked | How | On failure |
+|---------|-----|------------|
+| CLI installed | on `PATH` | install command for that provider |
+| CLI actually runs | `<bin> --version` exits 0 | same install command; catches half-finished installs |
+| Effort supported | against the provider's accepted set | the values it does accept |
+| Model known | against the registry's list | the known models, and `--force` to override |
+
+Effort is the check that earns its keep. `max` is this plugin's own level and works fine for Claude and Gemini, where effort is a prompt hint — but Codex passes it to a real API field that rejects it. Without the check that surfaces as a tab that flashes an error and disappears.
+
+The model check is deliberately soft. Model names change faster than this registry does, so an unknown model is a warning with `--force` attached, not a wall. Install and effort failures are hard, because they cannot be worked around by insisting.
+
+For `--provider custom`, only the first word of the template is checked for existence — nothing else about a CLI the registry does not know is knowable.
 
 ## Effort
 
@@ -85,8 +106,11 @@ def _mytool_tui(c: dict) -> list[str]:
 PROVIDERS["mytool"] = {
     "bin": "mytool",
     "tui": _mytool_tui,
-    "effort": "prompt",          # or "flag" if the CLI has a real one
+    "effort": "prompt",           # or "flag" if the CLI has a real one
+    "efforts": {"low", "medium", "high", "max"},   # what validation accepts
     "models": ["default-model"],
+    "install": "npm install -g mytool",
+    "login": "mytool auth",
 }
 ```
 

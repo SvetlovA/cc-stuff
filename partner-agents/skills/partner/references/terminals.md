@@ -19,6 +19,16 @@ Every terminal then only has to run one plain file path with no arguments. Addin
 
 The first available option wins.
 
+**0. Orca** — checked before everything else. When this session is running inside Orca, a detached OS terminal would put the partner outside the workspace the user is actually looking at, so the tab has to be created by Orca itself:
+
+```bash
+orca terminal create --worktree path:<repo> --title partner:<id> --command "<runner>" --json
+```
+
+Detection is by the environment Orca sets for processes it launches — `ORCA_WORKTREE_ID`, `ORCA_TERMINAL_HANDLE` or `ORCA_TAB_ID`. The binary is taken from `orca` on PATH, falling back to the path in `ORCA_CODEX_LAUNCH_PREFLIGHT`. If any of that is missing, or the call fails, the normal selection below continues — Orca is a preference, not a requirement.
+
+The partner lands as a tab in the current worktree, without stealing focus.
+
 **1. Multiplexers** — checked first, because if the user is already inside one, a real tab costs nothing and stays inside their existing window.
 
 | Condition | Command |
@@ -63,10 +73,16 @@ Relay that command to the user rather than reporting the spawn as failed — eve
 
 ## Verifying a tab
 
-`python partner.py list` shows the launch method that was used per partner:
+`python partner.py providers` ends with a line saying where partners will open, so it can be checked before spawning anything:
 
 ```
-  p2       codex    gpt-5-codex   effort=high   auto=edits [running] Windows Terminal tab
+Partners will open in Orca tab.
+```
+
+`python partner.py list` shows the launch method that was actually used per partner:
+
+```
+  p2       codex    gpt-5-codex   effort=high   auto=edits [running] Orca tab
 ```
 
 An empty method column means the agent is registered but its runner has not been started.

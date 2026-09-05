@@ -105,9 +105,22 @@ def save_roster(sd: Path, roster: dict) -> None:
 
 def git_exclude(root: Path) -> None:
     """Ignore .partner/ locally, without dirtying a tracked .gitignore."""
-    info = root / ".git" / "info"
-    if not info.parent.exists():
+    dot_git = root / ".git"
+    if not dot_git.exists():
         return
+    if dot_git.is_dir():
+        git_dir = dot_git
+    else:
+        # Worktree/submodule: .git is a file pointing at the real gitdir.
+        # info/exclude lives in the *common* dir shared by all worktrees,
+        # not the per-worktree gitdir, so ask git to resolve it.
+        common = _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if not common:
+            return
+        git_dir = Path(common)
+        if not git_dir.exists():
+            return
+    info = git_dir / "info"
     info.mkdir(parents=True, exist_ok=True)
     ex = info / "exclude"
     body = ex.read_text(encoding="utf-8") if ex.exists() else ""
@@ -425,13 +438,100 @@ def _gemini_tui(c: dict) -> list[str]:
 
 PROVIDERS: dict[str, dict] = {
     "claude": {"bin": "claude", "tui": _claude_tui, "effort": "prompt",
+               "efforts": set(EFFORT_HINT),
                "models": ["claude-opus-5", "claude-sonnet-5",
-                          "claude-haiku-4-5-20251001"]},
+                          "claude-haiku-4-5-20251001"],
+               "install": "npm install -g @anthropic-ai/claude-code",
+               "login": "claude  (then /login)"},
     "codex": {"bin": "codex", "tui": _codex_tui, "effort": "flag",
-              "models": ["gpt-5-codex", "gpt-5"]},
+              # A real flag, so only the values the API accepts work here.
+              # "max" is ours, not OpenAI's -- it maps onto "high".
+              "efforts": {"low", "medium", "high"},
+              "models": ["gpt-5-codex", "gpt-5"],
+              "install": "npm install -g @openai/codex",
+              "login": "codex login"},
     "gemini": {"bin": "gemini", "tui": _gemini_tui, "effort": "prompt",
-               "models": ["gemini-2.5-pro", "gemini-2.5-flash"]},
+               "efforts": set(EFFORT_HINT),
+               "models": ["gemini-2.5-pro", "gemini-2.5-flash"],
+               "install": "npm install -g @google/gemini-cli",
+               "login": "gemini  (then follow the browser prompt)"},
 }
+
+
+def cli_runs(binary: str) -> bool:
+    """Does the binary actually start? Catches broken or half-finished installs."""
+    try:
+        r = subprocess.run([binary, "--version"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=30)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def validate(provider: str, model: str | None, effort: str | None,
+             cmd: str | None, force: bool = False) -> list[str]:
+    """Check a partner's configuration, returning problems with their fixes.
+
+    Failing here costs a second; failing at launch costs a terminal tab that
+    flashes an error and disappears, which is much harder to diagnose. Each
+    problem carries the command that resolves it rather than only the fact.
+    """
+    problems = []
+    if provider == "custom":
+        if not cmd:
+            problems.append("--provider custom needs --cmd '<template containing {prompt}>'")
+        else:
+            binary = shlex.split(cmd)[0] if shlex.split(cmd) else ""
+            if binary and not _has(binary):
+                problems.append(
+                    f"'{binary}' is not on PATH. Install it, or correct the --cmd template.")
+        return problems
+
+    spec = PROVIDERS.get(provider)
+    if not spec:
+        problems.append(f"unknown provider '{provider}'. "
+                        f"Known: {', '.join(PROVIDERS)}, custom. "
+                        f"For anything else use: --provider custom --cmd '...'")
+        return problems
+
+    binary = spec["bin"]
+    if not _has(binary):
+        problems.append(f"'{binary}' is not installed or not on PATH. "
+                        f"Install it with:  {spec['install']}")
+    elif not cli_runs(binary):
+        problems.append(f"'{binary}' is on PATH but `{binary} --version` failed. "
+                        f"The install looks broken -- try:  {spec['install']}")
+
+    if effort and effort not in spec["efforts"]:
+        valid = ", ".join(sorted(spec["efforts"]))
+        extra = ""
+        if spec["effort"] == "flag" and effort == "max":
+            extra = " ('max' is this skill's own level; use 'high' for a real flag.)"
+        problems.append(f"effort '{effort}' is not supported by {provider}. "
+                        f"Use one of: {valid}.{extra}")
+
+    if model and model not in spec["models"] and not force:
+        problems.append(
+            f"model '{model}' is not in the known list for {provider}: "
+            f"{', '.join(spec['models'])}. If it is a new or aliased model the "
+            f"list has not caught up with, re-run with --force to use it anyway.")
+    return problems
+
+
+def cmd_check(args) -> int:
+    problems = validate(args.provider, args.model, args.effort, args.cmd, args.force)
+    if not problems:
+        bits = [args.provider]
+        if args.model:
+            bits.append(args.model)
+        if args.effort:
+            bits.append(f"effort={args.effort}")
+        emit(args, {"ok": True, "problems": []}, "ok: " + " / ".join(bits))
+        return 0
+    emit(args, {"ok": False, "problems": problems},
+         "cannot start this partner:" + NL
+         + NL.join(f"  - {p}" for p in problems))
+    return 1
 
 
 def _custom_tui(template: str, c: dict) -> list[str]:
@@ -495,6 +595,48 @@ def _has(binary: str) -> bool:
     return shutil.which(binary) is not None
 
 
+def orca_bin() -> str | None:
+    """The Orca CLI, but only when this session is running inside Orca.
+
+    Orca manages its own terminal tabs, so opening a partner in a detached
+    OS terminal there would strand it outside the workspace the user is
+    actually looking at. The env markers are set by Orca for processes it
+    launches; without them we are somewhere else and take the normal path.
+    """
+    if not (os.environ.get("ORCA_WORKTREE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE")
+            or os.environ.get("ORCA_TAB_ID")):
+        return None
+    found = shutil.which("orca")
+    if found:
+        return found
+    # Orca points at its own binary here; use it if PATH does not carry it.
+    fallback = os.environ.get("ORCA_CODEX_LAUNCH_PREFLIGHT", "")
+    return fallback if fallback and Path(fallback).exists() else None
+
+
+def open_orca_tab(title: str, runner: Path, cwd: Path) -> str:
+    """Open the partner as a tab in the current Orca worktree."""
+    orca = orca_bin()
+    if not orca:
+        return ""
+    cmd = (f'cmd /c "{runner}"' if os.name == "nt" else f'bash "{runner}"')
+    argv = [orca, "terminal", "create", "--worktree", f"path:{cwd}",
+            "--title", title, "--command", cmd, "--json"]
+    try:
+        r = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if r.returncode != 0:
+        return ""
+    try:
+        if json.loads(r.stdout).get("ok") is False:
+            return ""
+    except json.JSONDecodeError:
+        pass
+    return "Orca tab"
+
+
 def tab_command(title: str, runner: Path, cwd: Path) -> tuple[list[str], str] | None:
     """Pick the best available way to open a new tab. Returns (argv, label)."""
     r, c = str(runner), str(cwd)
@@ -542,6 +684,11 @@ def tab_command(title: str, runner: Path, cwd: Path) -> tuple[list[str], str] | 
 
 
 def open_tab(title: str, runner: Path, cwd: Path) -> str:
+    # Orca first: inside it, a detached OS terminal would put the partner
+    # outside the workspace the user is looking at.
+    label = open_orca_tab(title, runner, cwd)
+    if label:
+        return label
     picked = tab_command(title, runner, cwd)
     if not picked:
         return ""
@@ -681,13 +828,14 @@ def cmd_spawn(args) -> int:
     if pid in roster["partners"] and not args.replace:
         emit(args, {"error": "exists"}, f"agent {pid!r} already exists; pass --replace")
         return 1
-    if args.provider not in PROVIDERS and args.provider != "custom":
-        emit(args, {"error": "provider"},
-             f"unknown provider {args.provider!r}; known: {', '.join(PROVIDERS)}, custom")
-        return 1
-    if args.provider == "custom" and not args.cmd:
-        emit(args, {"error": "cmd"},
-             "--provider custom requires --cmd '<template containing {prompt}>'")
+
+    # Validate before anything is written or a tab is opened. A bad flag caught
+    # here is one message; caught at launch it is a tab that flashes an error
+    # and vanishes.
+    problems = validate(args.provider, args.model, args.effort, args.cmd, args.force)
+    if problems:
+        emit(args, {"error": "invalid", "problems": problems},
+             f"cannot start {pid}:" + NL + NL.join(f"  - {p}" for p in problems))
         return 1
 
     pdir = sd / pid
@@ -877,10 +1025,11 @@ def cmd_stop(args) -> int:
 
 def cmd_providers(args) -> int:
     rows = [{"provider": n, "installed": _has(s["bin"]), "models": s["models"],
+             "efforts": sorted(s["efforts"]), "install": s["install"],
              "effort": "native flag" if s["effort"] == "flag" else "prompt hint"}
             for n, s in PROVIDERS.items()]
     rows.append({"provider": "custom", "installed": None, "models": [],
-                 "effort": "template"})
+                 "efforts": [], "install": "", "effort": "template"})
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -888,6 +1037,12 @@ def cmd_providers(args) -> int:
     for r in rows:
         print(f"  {r['provider']:8} {labels[r['installed']]:15} "
               f"effort: {r['effort']:12} models: {', '.join(r['models']) or '-'}")
+        if r["efforts"]:
+            print(f"           {'':15} accepts effort: {', '.join(r['efforts'])}")
+        if r["installed"] is False:
+            print(f"           {'':15} install with: {r['install']}")
+    where = "Orca tab" if orca_bin() else "a new terminal tab"
+    print(f"{NL}Partners will open in {where}.")
     return 0
 
 
@@ -924,7 +1079,17 @@ def main() -> int:
     sp.add_argument("--context", default=None, help="handoff text, or path to a file")
     sp.add_argument("--no-tab", action="store_true")
     sp.add_argument("--replace", action="store_true")
+    sp.add_argument("--force", action="store_true",
+                    help="use a model the known list has not caught up with")
     sp.set_defaults(fn=cmd_spawn)
+
+    ck = sub.add_parser("check", help="validate a config without starting anything")
+    ck.add_argument("--provider", required=True)
+    ck.add_argument("--model", default=None)
+    ck.add_argument("--effort", default=None)
+    ck.add_argument("--cmd", default=None)
+    ck.add_argument("--force", action="store_true")
+    ck.set_defaults(fn=cmd_check)
 
     w = sub.add_parser("wait", help="block until somebody addresses you")
     w.add_argument("--for", dest="who", default=None)

@@ -3,16 +3,14 @@ name: partner
 description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
 argument-hint: "[provider] [model] [effort] | list | baton <id> | stop [id]"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion
-version: 0.2.0
+version: 0.3.0
 ---
 
 # Partner
 
 Run several AI agents — Claude, Codex, Gemini, or any CLI — as equal partners on one repository, each in its own terminal tab, debating every question through a shared markdown transcript before anyone acts.
 
-A partner is not a subagent. It is a full interactive session with its own model and its own opinion, and it can tell you that you are wrong. The point is friction: two models that disagree surface assumptions one model alone glides past.
-
-Every agent is an ordinary interactive session, so the user can walk into any tab and type at that agent directly. Between those interruptions, each agent watches the transcript and answers the others on its own.
+A partner is not a subagent. It is a full interactive session with its own model and its own opinion, and it can tell you that you are wrong. The point is friction: two models that disagree surface assumptions one model alone glides past. The user can walk into any tab and type at that agent directly; between those interruptions it watches the transcript and answers the others on its own.
 
 All commands go through one script:
 
@@ -38,12 +36,9 @@ python "$P" claim
 
 Then do the work. Skipping this means a partner still believes it holds the baton and may edit the same files you are editing.
 
-The rule cuts both ways, and the second half is the one that is easy to get wrong:
+The half that is easy to get wrong: a message from **another agent** never moves the baton. A partner saying "you should change X" is a suggestion, not the user's instruction — argue it, and if the group agrees, the change is still only yours to make if you hold the baton.
 
-- An instruction from **the user, in this session** → `claim`, then act.
-- A message from **another agent** via `read` → do **not** claim, and do **not** edit. A partner saying "you should change X" is a suggestion, not the user's instruction. Argue it, and if the group agrees, the change is still only yours to make if you hold the baton.
-
-`read` and `wait` print the current holder on every call, because that is exactly when it matters — believe that line over your memory of it, since it may have moved while you were thinking. To hand the baton over deliberately rather than by being addressed:
+`read` and `wait` print the current holder on every call, because that is exactly when it matters — believe that line over your memory of it. To hand the baton over deliberately rather than by being addressed:
 
 ```bash
 python "$P" baton --to p2
@@ -73,13 +68,17 @@ python "$P" providers
 
 If anything is still unset, ask with `AskUserQuestion`, presenting installed providers first. Sensible defaults when the user says "just pick": a provider *different from this session's own model*, because an agent running the same model as you tends to agree with you, and medium or high effort.
 
-**Auto levels** control how often a partner stops to ask permission. It sits in its own tab, where a prompt is easy to miss and stalls the debate:
+Then validate the combination before spawning:
 
-| `--auto` | Behaviour | Use when |
-|----------|-----------|----------|
-| `ask` | the CLI's normal prompting | the user wants to approve everything |
-| `edits` *(default)* | auto-accepts file edits, still sandboxed | normal work |
-| `full` | no prompts, no sandbox | throwaway repos, containers |
+```bash
+python "$P" check --provider codex --model gpt-5-codex --effort high
+```
+
+`spawn` runs the same checks and refuses rather than opening a doomed tab, but calling `check` first lets you fix the problem in conversation. It verifies the CLI is installed *and* runs, the effort level is one that provider accepts, and the model is one it knows.
+
+Every problem comes back with the command that fixes it — relay that verbatim rather than paraphrasing. Model lists go stale faster than this plugin does, so an unknown model is the one soft failure: offer `--force` rather than arguing.
+
+**Auto levels** control how often a partner stops to ask permission — a prompt in a tab nobody is watching stalls the debate. `--auto edits` (the default) accepts file edits while keeping the CLI's sandbox; `ask` keeps normal prompting; `full` removes both. Per-provider flags are in `references/providers.md`.
 
 For a CLI not in the registry, use `--provider custom` with a command template:
 
@@ -88,41 +87,28 @@ python "$P" spawn --provider custom --model gpt-4o \
   --cmd 'aider --model {model} --yes --message {prompt}'
 ```
 
-`{prompt}`, `{model}`, `{effort}` and `{auto}` are substituted; a template without `{prompt}` gets the starting prompt appended last. Put the CLI's own "stop asking me" flag in the template — `--auto` cannot be applied to a CLI the registry does not know.
+`{prompt}`, `{model}`, `{effort}` and `{auto}` are substituted. Put the CLI's own "stop asking me" flag in the template — `--auto` only maps onto providers the registry knows. See `references/providers.md`.
 
 ### Step 2 — Brief the partner on what it is joining
 
 A partner can be spawned at **any** point — before work starts, or twenty exchanges into a hard problem. Mid-work is the normal case, and it is where briefing matters most: a partner that does not know what was already settled will reopen it, confidently.
 
-Each partner gets its own briefing at `.partner/<id>/handoff.md`, so spawning a third never disturbs what the second was told. Three things go into it:
-
-| What | Who provides it |
-|------|-----------------|
-| Branch, recent commits, uncommitted changes, diffstat | **Automatic** — collected at spawn |
-| The debate so far, if one is underway | **Automatic** — last 20 transcript messages |
-| What is being built, what is decided, what is open | **You**, via `--context` |
-
-The automatic half means a hurried spawn still produces a useful partner. The half you write is what stops it re-litigating: state which decisions are closed and *why*, not a narrative of what was typed.
+Each partner gets its own briefing at `.partner/<id>/handoff.md`, so spawning a third never disturbs what the second was told. The branch, uncommitted diff and the debate so far are collected **automatically**, so even a hurried spawn produces a useful partner. What **you** add via `--context` is what stops it re-litigating: state which decisions are closed and *why*, not a narrative of what was typed.
 
 ```bash
 python "$P" spawn --provider codex --model gpt-5-codex --effort high \
-  --context "$(cat <<'EOF'
-Working on the auth rewrite in src/auth/.
-Decided: opaque session tokens, Redis-backed. Do not reopen — JWT revocation
-was the blocker.
-Open: whether refresh tokens rotate on every use or only near expiry.
-Constraint: cannot break the existing /v1/login contract.
-EOF
-)"
+  --context "Auth rewrite in src/auth/. Decided: opaque session tokens,
+  Redis-backed -- do not reopen, JWT revocation was the blocker. Open: do
+  refresh tokens rotate every use or only near expiry? Cannot break /v1/login."
 ```
 
-Pass `--context <path>` to reuse a file. Run `python "$P" snapshot` to preview the repo state that will be captured.
+`--context` also accepts a file path. `python "$P" snapshot` previews what will be captured.
 
-Spawn as many partners as useful. When adding one to an argument in progress, say in `--context` what you want *from it specifically*, or it will restate what the others already said.
+Spawn as many partners as useful. When adding one mid-argument, say what you want *from it specifically*, or it will restate what the others said.
 
 ### Step 3 — Confirm the tab opened
 
-`spawn` picks the best available terminal automatically (see `references/terminals.md`). If none can be opened, it prints the exact command for the user to run in a tab they open themselves — relay that command rather than treating the spawn as failed.
+`spawn` picks the best available terminal automatically. **Inside Orca it opens an Orca tab in the current worktree**, so the partner appears beside the session that spawned it rather than in a detached window; everywhere else it uses the platform's terminal (see `references/terminals.md`). If none can be opened it prints the command for the user to run themselves — relay that rather than calling the spawn failed.
 
 The tab runs the provider's normal interface, started on a briefing that tells it to loop: block on `wait` until someone addresses it, reply, repeat. So the user can read the debate as it happens, interrupt at any moment, and type at that agent directly — it answers them, then returns to the loop.
 
@@ -159,12 +145,14 @@ Skip the loop only for mechanical lookups where there is nothing to disagree abo
 ## Reference
 
 ```bash
-python "$P" providers                       # what is installed, models, effort support
+python "$P" providers                       # what is installed, models, efforts, where tabs open
+python "$P" check --provider X [--model M] [--effort E] [--force]
 python "$P" list                            # everyone here + who holds the baton
 python "$P" snapshot                        # repo state captured for a new partner
 python "$P" spawn --provider X [--model M] [--effort low|medium|high|max]
                   [--auto ask|edits|full] [--name id] [--context TEXT|PATH]
                   [--cmd 'template']        # with --provider custom
+                  [--force]                 # accept a model the list does not know
 python "$P" send --to @all --text "..." [--wait 240]   # --from defaults to you
 python "$P" read [--peek]                   # new messages; --peek keeps the cursor
 python "$P" wait [--for id] [--timeout 120] # block until addressed; partners use this
@@ -185,12 +173,14 @@ State lives in `.partner/` at the repo root — `chat.md` is the full transcript
 
 ## When things go wrong
 
-**Partner never replies.** Look at its tab. It may be waiting on a permission prompt (raise `--auto`), stuck on an error, or simply between `wait` calls. If the CLI failed to start, the tab shows why — check that it runs standalone and is authenticated.
+**Spawn refused with a list of problems.** That is validation, not a crash — each line ends with the command that fixes it.
 
-**Partner stopped looping.** Interactive agents sometimes end their turn instead of running `wait` again. Type "continue" in its tab, or `send` it a message — it picks up from there.
+**Partner never replies.** Check its tab: a permission prompt (raise `--auto`), an error, or simply between `wait` calls. If the CLI failed to start, the tab says why.
 
-**Partner agrees with everything.** Usually the same model as yours, or effort set too low. Stop it and spawn a different provider.
+**Partner stopped looping.** Interactive agents sometimes end their turn instead of running `wait` again. Type "continue" in its tab, or `send` it a message.
 
-**Partner edited files it should not have.** Either it still held the baton from the last time the user addressed it, or it treated another agent's suggestion as an instruction. Check `python "$P" list`; if the user is talking to you, run `claim` so the partners are told to stop.
+**Partner agrees with everything.** Usually the same model as yours, or effort too low. Stop it and spawn a different provider.
 
-**Debate will not converge.** Expected on genuine judgement calls. Stop after three exchanges and hand the choice to the user with both positions stated fairly.
+**Partner edited files it should not have.** It either still held the baton, or treated another agent's suggestion as an instruction. Run `claim` if the user is talking to you.
+
+**Debate will not converge.** Expected on judgement calls. Stop after three exchanges and hand the choice to the user with both positions stated fairly.
