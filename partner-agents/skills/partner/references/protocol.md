@@ -68,6 +68,7 @@ Because partners launch with permission prompting relaxed, this is a rule agents
 ├── p.cmd / p.sh       short wrapper -- how agents invoke partner.py
 └── <id>/
     ├── p.cmd / p.sh   this agent's wrapper -- carries its PARTNER_ID
+    ├── lastseen       heartbeat: when this agent last acted
     ├── seed.md        the briefing this agent was launched with
     ├── handoff.md     what was decided before it joined
     ├── cursor         byte offset of the last message it consumed
@@ -87,6 +88,26 @@ Past sessions live alongside, each a complete copy of the above:
 ```
 
 `.partner/` is added to `.git/info/exclude` by `partner.py init`, so it is ignored locally without modifying a tracked `.gitignore`.
+
+## Liveness
+
+`roster.json` records `status: "running"` because nothing has told it otherwise. Close a tab and the claim survives, so it cannot decide whether to add a partner or start over. Liveness is evidence instead:
+
+- **Heartbeat.** Every agent writes `<id>/lastseen` whenever it runs `wait`, `read`, `send` or `claim`. Acting is what proves it is alive, and `wait` returns every 120s and loops, so a working agent stamps at least every couple of minutes. Default window is 360s.
+- **Orca tab list.** Inside Orca, `orca terminal list` reports whether a tab titled `partner:<id>` still exists.
+
+A **fresh heartbeat outranks the tab list**. An agent that ran a command seconds ago is alive regardless of what the tab list says — checking tabs first would call it dead whenever the tab was renamed, launched with `--no-tab`, or started outside Orca. The tab check only downgrades an agent that has *not* checked in recently.
+
+`state` combines all of this with the session history into one answer, and ends with a `recommend`:
+
+| Situation | `recommend` |
+|-----------|-------------|
+| live partners exist | `add` — join the running session, never archive it |
+| stale partners, none live | `ask` — resume them or start fresh? |
+| roster empty, archived sessions exist | `ask` — fresh or resume which? |
+| nothing at all | `new` |
+
+It is one call on purpose: choosing between add, resume and fresh needs roster, liveness and history together, and fetching them separately invites deciding on half the picture.
 
 ## Sessions
 

@@ -358,6 +358,7 @@ def cmd_wait(args) -> int:
     who = args.who or me_id(load_roster(sd))
     deadline = time.time() + args.timeout
     while True:
+        touch_seen(sd, who)          # still here, still listening
         msgs = read_new(sd, who)
         if msgs:
             roster = load_roster(sd)
@@ -390,6 +391,7 @@ def cmd_claim(args) -> int:
         known = ", ".join(roster["partners"]) or "none"
         emit(args, {"error": "unknown"}, f"no agent named {who}; known: {known}")
         return 1
+    touch_seen(sd, who)
     prev = baton_of(roster)
     if prev == who:
         emit(args, {"baton": who, "changed": False},
@@ -1210,6 +1212,150 @@ def cmd_resume(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# liveness
+# --------------------------------------------------------------------------
+# roster.json says an agent is "running" because nothing has told it otherwise.
+# Close the tab and the claim survives, so it cannot be trusted to decide
+# whether to add a partner or start over. Liveness is evidence instead: every
+# agent stamps <id>/lastseen each time it acts, so being alive means having
+# done something recently rather than having been started once.
+
+LIVE_WINDOW = 360          # seconds; `wait` returns every 120s and loops
+
+
+def touch_seen(sd: Path, pid: str) -> None:
+    try:
+        d = sd / pid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "lastseen").write_text(utcnow(), encoding="utf-8")
+    except OSError:
+        pass                # a heartbeat is never worth failing a command over
+
+
+def last_seen(sd: Path, pid: str) -> str | None:
+    f = sd / pid / "lastseen"
+    if not f.exists():
+        return None
+    try:
+        return f.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _age_seconds(stamp: str | None) -> float | None:
+    if not stamp:
+        return None
+    try:
+        t = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - t).total_seconds()
+
+
+def orca_tab_titles() -> set[str] | None:
+    """Titles of live Orca terminals, or None when Orca cannot answer.
+
+    Inside Orca this is better evidence than a heartbeat: it reports the tab
+    itself rather than what the agent last did in it.
+    """
+    orca = orca_bin()
+    if not orca:
+        return None
+    try:
+        r = subprocess.run([orca, "terminal", "list", "--json"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30)
+        if r.returncode != 0:
+            return None
+        res = json.loads(r.stdout).get("result", {})
+        terms = res.get("terminals") or res.get("items") or []
+        return {str(t.get("title", "")) for t in terms}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def liveness(sd: Path, roster: dict, window: int = LIVE_WINDOW) -> dict:
+    """Classify every agent as live, stale or stopped, and say why."""
+    me = me_id(roster)
+    titles = orca_tab_titles()
+    out = {}
+    for pid, entry in roster.get("partners", {}).items():
+        if entry.get("status") == "stopped":
+            out[pid] = {"state": "stopped", "why": "stopped explicitly", "age": None}
+            continue
+        if pid == me or (entry.get("kind") == "session"):
+            out[pid] = {"state": "live", "why": "this session", "age": 0}
+            continue
+        age = _age_seconds(last_seen(sd, pid))
+        # A fresh heartbeat outranks everything else: the agent demonstrably
+        # ran a command just now. Checking the tab list first would call it
+        # dead whenever the tab was renamed, started outside Orca, or launched
+        # with --no-tab -- a false negative that throws away a working partner.
+        if age is not None and age <= window:
+            out[pid] = {"state": "live", "age": age,
+                        "why": f"acted {int(age)}s ago"}
+        elif titles is not None and f"partner:{pid}" not in titles:
+            out[pid] = {"state": "stale", "age": age,
+                        "why": "no Orca tab, and no recent activity"}
+        elif age is None:
+            out[pid] = {"state": "stale", "age": None,
+                        "why": "never checked in -- may not have started"}
+        else:
+            out[pid] = {"state": "stale", "age": age,
+                        "why": f"last acted {int(age // 60)} min ago"}
+    return out
+
+
+def cmd_state(args) -> int:
+    """What is actually going on, so the caller can pick the right next move.
+
+    Deliberately one call: deciding between adding a partner, resuming and
+    starting fresh needs roster, liveness and history together, and asking for
+    them separately invites deciding on half the picture.
+    """
+    sd = state_dir()
+    roster = load_roster(sd)
+    live_map = liveness(sd, roster, args.window)
+    me = me_id(roster)
+    others = {p: v for p, v in live_map.items() if p != me}
+    live = [p for p, v in others.items() if v["state"] == "live"]
+    stale = [p for p, v in others.items() if v["state"] == "stale"]
+    past = read_sessions(sd)
+
+    if live:
+        rec, why = "add", (f"{', '.join(live)} still active -- a new partner should "
+                           f"join this session, not replace it")
+    elif stale:
+        rec, why = "ask", (f"{', '.join(stale)} in the roster but not responding -- "
+                           f"resume them, or start fresh?")
+    elif past:
+        rec, why = "ask", "no partners running; start fresh or resume an archived session?"
+    else:
+        rec, why = "new", "nothing running and no history -- start a new session"
+
+    data = {"self": me, "baton": baton_of(roster), "live": live, "stale": stale,
+            "agents": live_map, "sessions": [
+                {"id": m["id"], "label": m.get("label"),
+                 "agents": list(m.get("agents", {})),
+                 "messages": m.get("messages", 0)} for m in past],
+            "messages": len(tail_msgs(sd, 100000)), "recommend": rec, "why": why}
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+
+    print(f"you are {me}; baton held by {data['baton']}")
+    for pid, v in live_map.items():
+        mark = {"live": "live   ", "stale": "STALE  ", "stopped": "stopped"}[v["state"]]
+        print(f"  {pid:8} {mark} {v['why']}")
+    if past:
+        print(f"{NL}{len(past)} archived session(s):")
+        for m in past[:5]:
+            print(f"  {m['id']}   {m.get('label', '')}")
+    print(f"{NL}suggested: {rec} -- {why}")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # messaging + roster
 # --------------------------------------------------------------------------
 
@@ -1217,6 +1363,7 @@ def cmd_send(args) -> int:
     sd = state_dir()
     roster = load_roster(sd)
     args.sender = args.sender or me_id(roster)
+    touch_seen(sd, args.sender)
     body = args.text
     if args.file:
         body = Path(args.file).read_text(encoding="utf-8")
@@ -1257,6 +1404,7 @@ def cmd_read(args) -> int:
     sd = state_dir()
     roster = load_roster(sd)
     who = args.who or me_id(roster)
+    touch_seen(sd, who)
     msgs = read_new(sd, who, advance=not args.peek)
     if args.json:
         print(json.dumps({"baton": baton_of(roster), "you": who,
@@ -1279,12 +1427,14 @@ def cmd_list(args) -> int:
         print("nobody here -- spawn someone with: partner.py spawn --provider codex")
         return 0
     me = me_id(roster)
+    live_map = liveness(sd, roster)
     for pid, p in roster["partners"].items():
         mark = " <-- baton" if holder == pid else ""
         mark += "  (you)" if pid == me else ""
+        st = live_map.get(pid, {}).get("state", "?")
         print(f"  {pid:8} {p['provider']:8} {p.get('model') or '-':22} "
               f"effort={p.get('effort') or '-':6} auto={p.get('auto') or '-':6}"
-              f"[{p.get('status')}] {p.get('tab') or ''}{mark}")
+              f"[{st}] {p.get('tab') or ''}{mark}")
     return 0
 
 
@@ -1415,6 +1565,11 @@ def main() -> int:
 
     sub.add_parser("sessions", help="list the current and archived sessions"
                    ).set_defaults(fn=cmd_sessions)
+
+    stt = sub.add_parser("state", help="who is actually alive, and what to do next")
+    stt.add_argument("--window", type=int, default=LIVE_WINDOW,
+                     help="seconds since an agent last acted before it counts as stale")
+    stt.set_defaults(fn=cmd_state)
 
     rs = sub.add_parser("resume", help="restart the agents of a session")
     rs.add_argument("--session", default=None,

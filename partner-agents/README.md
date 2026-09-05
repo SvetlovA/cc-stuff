@@ -16,6 +16,7 @@ A partner is a **separate process** with its own provider, model, and context �
 - **No lead agent, and it is structural.** The session you are typing in registers itself as `p1` with the same config fields, the same briefing document and its own identity wrapper as every agent it spawns — built by the same code, so the two cannot drift. Any partner can spawn more partners; any partner can take the baton. The only asymmetry is the baton, and it moves.
 - **Only the partner you just spoke to can write.** The write baton follows your attention: the moment you type an instruction into a tab, that agent claims it and the others are told to stop editing. A partner asking another partner to change something is a suggestion, not an instruction — it does not move the baton. Concurrent edits produce conflicts nobody can see.
 - **Runs as many partners as you want** — `p2`, `p3`, `p4` alongside you, each with its own provider, model and effort, all debating in one shared transcript.
+- **Knows who is actually alive.** Agents stamp a heartbeat when they act, so a partner whose tab you closed is reported as stale rather than trusted to be running. Asking for a partner while others are live *adds* one; asking when nothing is live gets you a question — resume, or start fresh?
 - **Sessions you can come back to.** Every new arrangement files the previous one under `.partner/sessions/` — roster, transcript and briefings intact. `resume` rebuilds all its agents with their original models and re-briefs them from the transcript, so the argument continues instead of restarting.
 - **Keeps everything in plain markdown.** `.partner/chat.md` is the whole conversation, readable in any editor at any time.
 
@@ -83,6 +84,13 @@ You become `p1`, the partner `p2`, both with the same config fields and the same
 ## Sessions
 
 ```
+$ partner.py state
+you are p1; baton held by p1
+  p1       live    this session
+  p2       live    acted 12s ago
+
+suggested: add -- p2 still active -- a new partner should join this session, not replace it
+
 $ partner.py sessions
 current   2 agents, 5 messages   Should div() guard against zero?
 20260905-185729   2 agents, 1 messages   [p1, p2]
