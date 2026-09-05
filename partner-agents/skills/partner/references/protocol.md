@@ -98,20 +98,17 @@ Past sessions live alongside, each a complete copy of the above:
 
 A **fresh heartbeat outranks the tab list**. An agent that ran a command seconds ago is alive regardless of what the tab list says — checking tabs first would call it dead whenever the tab was renamed, launched with `--no-tab`, or started outside Orca. The tab check only downgrades an agent that has *not* checked in recently.
 
-`state` combines all of this with the session history into one answer, and ends with a `recommend`:
+`state` combines all of this with the session history into one answer, and ends with a `recommend` (`add` / `ask` / `new`).
 
-| Situation | `recommend` |
-|-----------|-------------|
-| live partners exist | `add` — join the running session, never archive it |
-| stale partners, none live | `ask` — resume them or start fresh? |
-| roster empty, archived sessions exist | `ask` — fresh or resume which? |
-| nothing at all | `new` |
+The `recommend` is advisory. What actually decides add-vs-fresh is the **invocation**: a bare `/partner` starts a new session (`spawn --fresh`), `/partner add` joins the live one (`spawn`). `state` is read to *narrate* that — "you are about to archive 2 agents, 6 messages" — and to catch the cases where the user's intent and the roster disagree (a bare `resume` with nothing archived, an `add` with no session running).
 
-It is one call on purpose: choosing between add, resume and fresh needs roster, liveness and history together, and fetching them separately invites deciding on half the picture.
+It is one call on purpose: roster, liveness and history belong together, and fetching them separately invites deciding on half the picture.
 
 ## Sessions
 
 A session is one arrangement of agents plus the transcript they produced. Starting a new one never destroys the old: `archive` moves the live session under `sessions/` whole — files moved, not copied and deleted — and leaves a clean slate. `spawn --fresh` does this as its first act, so a new invocation of the skill cannot silently overwrite the previous argument.
+
+A session with **only this session in it and nothing said beyond system notices** is not archived — there is nothing to come back to, and filing it away would force a needless re-init. So `spawn --fresh` on a cold roster just adds the first partner; the archive step is a no-op.
 
 `meta.json` records each agent's provider, model, effort and auto level, which is what makes rebuilding possible. The `label` is the first non-`system` message in the transcript, so a list of sessions reads as a list of questions rather than timestamps.
 
@@ -119,6 +116,8 @@ A session is one arrangement of agents plus the transcript they produced. Starti
 
 - Each agent's `handoff.md` is rewritten from the restored transcript, so it knows what was already settled.
 - Each cursor is set to the end of that transcript. Without this an agent would find the entire history sitting in its inbox and try to answer all of it.
+
+`spawn` sets a new partner's cursor the same way, once, right after announcing its arrival: the backlog is already in its `handoff.md`, so its first `wait` should block for the question being put to it, not return the whole transcript.
 
 A `system` message then announces the resume, which is the one new message every agent sees.
 

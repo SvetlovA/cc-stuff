@@ -820,17 +820,21 @@ waste of tokens; one that disagrees with everything is noise.
 """
 
 LOOP_TAB = """
+This loop is the whole job. Never end your turn except at step 5 -- after every
+reply, every timeout, and every answer to the human, go back to step 1 and run
+`wait` again. If you stop looping, the others are talking to a dead tab.
+
 1. `{run} wait`
 2. If a message came back from another agent: think, verify against the code,
    then reply with `{run} send`. Do not edit files -- you were not asked by the
    human. If you hold the baton and the group has settled on a change, make it
-   and report what you changed.
-3. If it timed out with nothing, just run `wait` again.
+   and report what you changed. Then go to step 1.
+3. If it timed out with nothing, go straight back to step 1.
 4. If the human types at you instead: `{run} claim` first, then answer and act
-   on what they asked. Tell the others what you did with `send`, then resume
-   at 1.
-5. If you see a system message saying you have been stopped, say goodbye and
-   stop looping.
+   on what they asked. Tell the others what you did with `send`, then go to
+   step 1.
+5. Only when you see a system message saying you have been stopped: say goodbye
+   and exit the loop.
 """
 
 LOOP_SESSION = """
@@ -980,6 +984,17 @@ def cmd_spawn(args) -> int:
                f"It has been briefed on the work so far. Address it as `{pid}`.",
                baton_of(roster))
 
+    # Start the newcomer's cursor at the end of the transcript. Everything said
+    # so far is already in its handoff.md; leaving the cursor at zero makes its
+    # very first `wait` return the whole backlog at once, which it then tries to
+    # answer instead of blocking for the question actually being put to it --
+    # and usually ends its turn without looping back. `resume` does the same
+    # thing for the same reason.
+    chat_now = sd / "chat.md"
+    (pdir / "cursor").write_text(
+        str(chat_now.stat().st_size if chat_now.exists() else 0),
+        encoding="utf-8")
+
     manual = (f'cmd /c "{runner}"' if os.name == "nt" else f'bash "{runner}"')
     spec = (f"{args.provider}"
             f"{'/' + args.model if args.model else ''}"
@@ -1028,11 +1043,28 @@ def session_label(sd: Path, roster: dict) -> str:
     return f"no discussion ({ids})" if ids else "empty"
 
 
+def session_has_substance(sd: Path, roster: dict) -> bool:
+    """Whether the live session is one anybody would want back.
+
+    A roster holding only this session -- no spawned partners -- with nothing
+    said beyond system notices is not a session that happened. Archiving it
+    just files an empty transcript away and forces a needless re-init on the
+    next spawn. A bare `/partner` from a cold session leans on this: `--fresh`
+    then archives nothing and simply adds the first partner.
+    """
+    partners = roster.get("partners", {})
+    if any((p.get("kind") or "tab") != "session" for p in partners.values()):
+        return True
+    return any(m["from"] != "system" for m in tail_msgs(sd, 1000))
+
+
 def archive_current(sd: Path, label: str | None = None) -> dict | None:
     """Move the live session under sessions/ and leave the slate clean."""
     roster = load_roster(sd)
     chat = sd / "chat.md"
     if not roster["partners"] and not chat.exists():
+        return None
+    if not session_has_substance(sd, roster):
         return None
 
     sid = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1323,13 +1355,15 @@ def cmd_state(args) -> int:
     past = read_sessions(sd)
 
     if live:
-        rec, why = "add", (f"{', '.join(live)} still active -- a new partner should "
-                           f"join this session, not replace it")
+        rec, why = "add", (f"{', '.join(live)} active -- `/partner` archives this "
+                           f"session and starts one partner fresh; `/partner add` "
+                           f"keeps it and joins")
     elif stale:
         rec, why = "ask", (f"{', '.join(stale)} in the roster but not responding -- "
-                           f"resume them, or start fresh?")
+                           f"`/partner` archives and starts fresh; `resume` rebuilds them")
     elif past:
-        rec, why = "ask", "no partners running; start fresh or resume an archived session?"
+        rec, why = "ask", ("no partners running -- `/partner` starts fresh, "
+                           "`resume --session <id>` brings an archived one back")
     else:
         rec, why = "new", "nothing running and no history -- start a new session"
 

@@ -1,9 +1,9 @@
 ---
 name: partner
-description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
-argument-hint: "[provider] [model] [effort] | resume [id] | sessions | list | baton <id> | stop"
+description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
+argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | stop"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion
-version: 0.7.0
+version: 0.8.0
 ---
 
 # Partner
@@ -42,37 +42,42 @@ The half that is easy to get wrong: a message from **another agent** never moves
 
 Because partners run unprompted this is a rule they keep, not a wall they hit. The reason matters more than the rule: two agents editing the same files concurrently produce conflicts neither can see, and the user loses work.
 
+## What the invocation means
 
-## Step 0 — Always start here
+`/partner` has two shapes, and they differ in exactly one thing — whether the session already running is kept:
 
-Before anything else, find out what is actually running:
+| The user types | Meaning | What you run |
+|----------------|---------|--------------|
+| `/partner` — alone, or `/partner <provider> [model] [effort]` | **start a new session** | `spawn --fresh` — archive the current session, then bring up **one** new partner on a clean slate |
+| `/partner add [provider ...]` | **add to the session in progress** | `spawn` *without* `--fresh` — another partner joins the ones already running; nothing is archived |
+| `/partner resume [id]` | bring a session back | `resume [--session <id>]` — every agent rebuilt and re-briefed from its transcript |
+| `/partner sessions` · `list` · `baton <id>` · `stop` | inspect or manage | the matching command |
+
+The bare form is a *fresh* session because that is the common case: the user sat down to think a new problem through. Reach for `add` only when partners are already live and the user wants one more voice in that same argument.
+
+## Step 0 — See what a fresh `/partner` would replace
 
 ```bash
 python "$P" state
 ```
 
-`status: running` in the roster is only a claim — an agent whose tab was closed still says it. `state` uses evidence instead: every agent stamps a heartbeat when it acts, so **live** means it did something in the last few minutes, and inside Orca the tab list corroborates. It reports `live`, `stale` and `stopped` agents, the archived sessions, and a `recommend`.
+`status: running` in the roster is only a claim — an agent whose tab was closed still says it. `state` uses evidence: every agent stamps a heartbeat when it acts, so **live** means it did something in the last few minutes, and inside Orca the tab list corroborates. It reports `live`, `stale` and `stopped` agents and the archived sessions.
 
-Let that decide the shape of the work:
+`state` is **informational** — the invocation above already decided the shape of the work. Use `state` to narrate the consequence:
 
-| `state` says | What the user means | Do |
-|--------------|--------------------|-----|
-| **live partners exist** | add to the argument in progress | `spawn` *without* `--fresh` — the new partner joins |
-| **stale partners, none live** | ambiguous | **ask** |
-| **roster empty, archived sessions exist** | ambiguous | **ask** |
-| **nothing at all** | start something | `spawn --fresh` |
+- **`/partner` (fresh):** run `spawn --fresh`. If `state` shows a real session (any partner besides this one, or a real discussion in the transcript), say in one line what is being filed away — *"archiving current session (2 agents, 6 messages) — `/partner resume <id>` brings it back"* — then spawn. If the roster holds only this session, `--fresh` archives nothing and simply adds the partner; no notice needed.
+- **`/partner add`:** run `spawn` without `--fresh`. If `state` shows no partners at all, note that the session looks empty and confirm they did not mean a fresh start — but if they were explicit, just proceed.
+- **`/partner resume` with nothing archived:** there is nothing to resume — offer a fresh start instead.
 
-Never archive a session with live partners in it. A running debate is the user's work in progress, and `--fresh` files it away — the partners they were talking to vanish mid-argument.
-
-**When it is ambiguous, ask — here or at any later step.** Use `AskUserQuestion` and offer what actually exists: resume the current partners, start fresh, or resume a named archived session (`sessions` labels each with the first real thing said in it). Explicit wording wins over the recommendation: "add gemini too" adds; "start over" goes fresh even with partners live — but say plainly that the running session gets archived first.
+A fresh `/partner` archiving a live debate is intentional and reversible (`resume`), but always name what you archived so the user can get back to it.
 
 ## Sessions
 
 ```bash
-python "$P" state                                # who is alive, what to do
+python "$P" state                                # who is alive; what a fresh /partner replaces
 python "$P" sessions                             # current + archived
-python "$P" spawn --provider codex --fresh ...   # archive the old, start new
-python "$P" spawn --provider codex ...           # add to the live session
+python "$P" spawn --provider codex --fresh ...   # /partner: new session, archive the old
+python "$P" spawn --provider codex ...           # /partner add: join the live session
 python "$P" resume                               # restart the current agents
 python "$P" resume --session 20260905-185718     # bring an archived one back
 ```
@@ -106,14 +111,16 @@ Each gets its own `.partner/<id>/handoff.md`, so a third never disturbs the seco
 One `spawn` call does everything: it registers **you** from the `--me-*` values, writes both briefings, and opens the partner's tab. Describe yourself as fully as the partner — you are a peer, not the thing the others hang off.
 
 ```bash
-python "$P" spawn --provider codex --model gpt-5-codex --effort high \
+python "$P" spawn --provider codex --model gpt-5-codex --effort high --fresh \
   --me-provider claude --me-model <this session's model id> --me-effort high \
   --context "Auth rewrite in src/auth/. Decided: opaque session tokens,
   Redis-backed -- do not reopen, JWT revocation was the blocker. Open: do
   refresh tokens rotate every use or only near expiry? Cannot break /v1/login."
 ```
 
-You take `p1` and the partner `p2`. Afterwards read your own briefing at `.partner/p1/seed.md` — the same document the partner received.
+`--fresh` is what a bare `/partner` uses — it archives the running session first (a no-op when only this session is registered). Drop `--fresh` for `/partner add`, so the new partner joins instead.
+
+You take `p1` and the partner `p2` (or the next free number when adding). Afterwards read your own briefing at `.partner/p1/seed.md` — the same document the partner received.
 
 `--context` also accepts a file path. When adding a partner mid-argument, say what you want *from it specifically*, or it will restate what the others said.
 

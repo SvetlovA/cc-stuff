@@ -6,7 +6,7 @@ A public collection of Claude Code plugins for developer workflows. Install any 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 0.7.0 |
+| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 0.8.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.6.1 |
 
 ## Installing a Plugin
@@ -43,10 +43,10 @@ Runs several AI agents as equal partners, each in its own terminal tab, so decis
 - Runs **as many partners as you want**, all debating in one shared `.partner/chat.md` transcript
 
 - One `spawn` call registers you **and** starts the partner, so the arrangement cannot be left half-built
-- **Liveness-aware**: heartbeats tell it whether partners are really running, so asking for a partner adds one to a live debate instead of wiping it — and when it is ambiguous, it asks
-- **Session history**: each new arrangement archives the last one whole; `resume` rebuilds every agent with its model and re-briefs it from the transcript, continuing the argument rather than restarting it
+- **Liveness-aware**: heartbeats tell it whether partners are really running, so a partner whose tab you closed shows as stale rather than trusted to be alive
+- **Session history**: `/partner` starts a new session and archives the last one whole (a no-op if nothing was running); `/partner add` joins the debate in progress; `resume` rebuilds every agent with its model and re-briefs it from the transcript, continuing the argument rather than restarting it
 
-**Invoke with:** `/partner [provider] [model] [effort]`, plus `/partner list`, `/partner baton <id>`, `/partner stop`
+**Invoke with:** `/partner [provider] [model] [effort]` for a fresh session, `/partner add [provider ...]` to join one, plus `/partner resume [id]`, `/partner list`, `/partner baton <id>`, `/partner stop`
 
 **Requires:** Python 3.9+ and at least one agent CLI installed
 
