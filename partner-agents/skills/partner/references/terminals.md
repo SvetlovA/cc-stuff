@@ -1,6 +1,6 @@
 # Terminal tabs
 
-`spawn` opens each partner in its own terminal tab so the user can watch the debate and type at the partner directly.
+`spawn` opens each partner in its own terminal tab. The tab runs the provider's normal interactive interface, so the user can read the debate as it happens and type at that agent directly at any moment.
 
 ## The runner-script indirection
 
@@ -52,9 +52,9 @@ On Linux, only GNOME Terminal, Konsole and Xfce Terminal give real tabs; the res
 Headless servers, SSH sessions without a display, and containers have no terminal to open. `spawn` still registers the partner and prints the exact command to run:
 
 ```
-partner p1 (codex/gpt-5-codex/high) registered, but no terminal could be opened.
+p2 (codex/gpt-5-codex/high, auto=edits) registered, but no terminal could be opened.
 Open a tab yourself and run:
-  bash "/repo/.partner/p1/run.sh"
+  bash "/repo/.partner/p2/run.sh"
 ```
 
 Relay that command to the user rather than reporting the spawn as failed — everything except the tab worked, and the partner starts participating the moment that command runs.
@@ -66,7 +66,7 @@ Relay that command to the user rather than reporting the spawn as failed — eve
 `python partner.py list` shows the launch method that was used per partner:
 
 ```
-  p1       codex    gpt-5-codex   effort=high   loop  [running] Windows Terminal tab
+  p2       codex    gpt-5-codex   effort=high   auto=edits [running] Windows Terminal tab
 ```
 
-An empty method column means the partner is registered but its runner has not been started.
+An empty method column means the agent is registered but its runner has not been started.

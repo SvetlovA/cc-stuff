@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
-"""partner.py - spawn and drive peer AI agents that debate with you.
+"""partner.py - run several AI agents as equal partners on one repository.
+
+Every agent, including the one that spawned the others, is an ordinary
+interactive session in its own terminal tab. You can walk into any tab and type
+at that agent directly; between your interruptions each agent watches a shared
+transcript and answers the others on its own.
 
 One file, no third-party deps, runs on Windows / macOS / Linux.
 
 State lives in <repo>/.partner/:
     roster.json        every agent, which one is you, who holds the write baton
     chat.md            the single shared debate transcript
-    <id>/handoff.md    that agent's briefing, written when it is spawned
+    <id>/seed.md       the briefing that agent was launched with
+    <id>/handoff.md    what was decided before it joined
     <id>/cursor        byte offset of the last message that agent consumed
-    <id>/session       provider session id, for resuming its context
-    <id>/log           raw provider output from the watcher loop
+    <id>/run.sh|.cmd   the command its terminal tab runs
 
-Every agent is an equal participant, including the one that spawned the rest.
-The only asymmetry is the write baton, and it moves.
-
-Every subcommand prints either plain text or JSON (--json) so the calling
-agent can parse it without screen-scraping.
+Every subcommand prints either plain text or JSON (--json) so an agent can
+parse it without screen-scraping.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shlex
 import re
 import shutil
 import subprocess
@@ -30,8 +33,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+NL = chr(10)
 MSG_DELIM = "<!--/msg-->"
-DEFAULT_POLL = 4.0
+WAIT_POLL = 3.0
+WAIT_TIMEOUT = 120
 
 
 # --------------------------------------------------------------------------
@@ -107,8 +112,8 @@ def git_exclude(root: Path) -> None:
     ex = info / "exclude"
     body = ex.read_text(encoding="utf-8") if ex.exists() else ""
     if ".partner/" not in body:
-        sep = "" if body.endswith("\n") or not body else "\n"
-        ex.write_text(f"{body}{sep}.partner/\n", encoding="utf-8")
+        sep = "" if body.endswith(NL) or not body else NL
+        ex.write_text(f"{body}{sep}.partner/{NL}", encoding="utf-8")
 
 
 def _git(root: Path, *args: str) -> str:
@@ -124,7 +129,7 @@ def _clip(text: str, limit: int, what: str) -> str:
     rows = text.splitlines()
     if len(rows) <= limit:
         return text
-    return "\n".join(rows[:limit]) + f"\n... (+{len(rows) - limit} more {what})"
+    return NL.join(rows[:limit]) + f"{NL}... (+{len(rows) - limit} more {what})"
 
 
 def repo_snapshot(root: Path) -> str:
@@ -141,22 +146,45 @@ def repo_snapshot(root: Path) -> str:
     out = [f"Repo: {root.name}   Branch: {branch}"]
     log = _git(root, "log", "--oneline", "-5")
     if log:
-        out.append(f"\nRecent commits:\n{log}")
+        out.append(f"{NL}Recent commits:{NL}{log}")
     status = _git(root, "status", "--short")
     if not status:
-        out.append("\nWorking tree is clean.")
-        return "\n".join(out)
-    out.append(f"\nUncommitted changes:\n{_clip(status, 40, 'files')}")
+        out.append(f"{NL}Working tree is clean.")
+        return NL.join(out)
+    out.append(f"{NL}Uncommitted changes:{NL}{_clip(status, 40, 'files')}")
     stat = _git(root, "diff", "--stat", "HEAD")
     if stat:
-        out.append(f"\nDiff against HEAD:\n{_clip(stat, 40, 'files')}")
-    return "\n".join(out)
+        out.append(f"{NL}Diff against HEAD:{NL}{_clip(stat, 40, 'files')}")
+    return NL.join(out)
 
 
 def cmd_snapshot(args) -> int:
     snap = repo_snapshot(repo_root()) or "(not a git repository)"
     emit(args, {"snapshot": snap}, snap)
     return 0
+
+
+def write_wrappers(sd: Path, script: Path) -> str:
+    """Write .partner/p.cmd and .partner/p.sh, and return the short form to use.
+
+    Every agent command otherwise carries an absolute path to this script --
+    ~90 characters repeated a dozen times through the briefing, which is noise
+    the model has to read past on every line. A shell variable would be the
+    usual fix, but agent harnesses generally run each command in a fresh shell,
+    so nothing persists. A wrapper file does.
+    """
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "p.cmd").write_text(
+        '@echo off\r\n\"{}" \"{}" %*\r\n'.format(sys.executable, script),
+        encoding="utf-8")
+    sh = sd / "p.sh"
+    sh.write_text('#!/usr/bin/env bash{}exec \"{}" \"{}" \"$@\"{}'.format(
+        NL, sys.executable, script, NL), encoding="utf-8")
+    try:
+        sh.chmod(0o755)
+    except OSError:
+        pass
+    return ".partner\\p.cmd" if os.name == "nt" else ".partner/p.sh"
 
 
 def cmd_init(args) -> int:
@@ -166,10 +194,10 @@ def cmd_init(args) -> int:
     chat = sd / "chat.md"
     if not chat.exists():
         chat.write_text(
-            "# Partner debate transcript\n\n"
-            "Shared by every agent in this session. Append only; never rewrite history.\n\n",
-            encoding="utf-8",
-        )
+            "# Partner debate transcript" + NL * 2
+            + "Shared by every agent working on this repo. "
+            + "Append only; never rewrite history." + NL * 2,
+            encoding="utf-8")
     roster = load_roster(sd)
     me = roster.get("self") or getattr(args, "me_name", None) or "p1"
     if me not in roster["partners"]:
@@ -177,14 +205,15 @@ def cmd_init(args) -> int:
             "id": me,
             "provider": getattr(args, "me_provider", None) or "claude",
             "model": getattr(args, "me_model", None),
-            "effort": None, "cmd": None, "mode": "session",
-            "status": "running", "started": utcnow(), "greeted": True,
+            "effort": None, "cmd": None, "auto": None,
+            "status": "running", "started": utcnow(),
             "tab": "this session",
         }
     roster["self"] = me
     if roster.get("baton") not in roster["partners"]:
         roster["baton"] = me
     save_roster(sd, roster)
+    write_wrappers(sd, Path(__file__).resolve())
     git_exclude(root)
     emit(args, {"state_dir": str(sd), "repo_root": str(root), "self": me},
          f"initialized {sd} (you are {me})")
@@ -199,11 +228,9 @@ def append_msg(sd: Path, sender: str, to: str, body: str, baton: str) -> None:
     chat = sd / "chat.md"
     chat.parent.mkdir(parents=True, exist_ok=True)
     if not chat.exists():
-        chat.write_text("# Partner debate transcript\n\n", encoding="utf-8")
-    entry = (
-        f"\n### {utcnow()} | from:{sender} | to:{to} | baton:{baton}\n\n"
-        f"{body.strip()}\n\n{MSG_DELIM}\n"
-    )
+        chat.write_text("# Partner debate transcript" + NL * 2, encoding="utf-8")
+    entry = (f"{NL}### {utcnow()} | from:{sender} | to:{to} | baton:{baton}{NL * 2}"
+             f"{body.strip()}{NL * 2}{MSG_DELIM}{NL}")
     with chat.open("a", encoding="utf-8") as fh:
         fh.write(entry)
 
@@ -220,10 +247,10 @@ def parse_msgs(text: str) -> list[dict]:
         m = HEADER_RE.search(chunk)
         if not m:
             continue
-        body = chunk[m.end():].strip()
         out.append({
             "ts": m.group("ts"), "from": m.group("from"),
-            "to": m.group("to"), "baton": m.group("baton"), "body": body,
+            "to": m.group("to"), "baton": m.group("baton"),
+            "body": chunk[m.end():].strip(),
         })
     return out
 
@@ -257,168 +284,209 @@ def tail_msgs(sd: Path, n: int) -> list[dict]:
     return parse_msgs(chat.read_text(encoding="utf-8", errors="replace"))[-n:]
 
 
+def render(msgs: list[dict]) -> str:
+    return (NL * 2).join(
+        f"### {m['ts']} | {m['from']} -> {m['to']} | baton:{m['baton']}{NL * 2}{m['body']}"
+        for m in msgs)
+
+
+def baton_banner(roster: dict, who: str) -> str:
+    """A one-line reminder of write permission, printed with every inbox read.
+
+    The reminder lands at exactly the moment it is needed -- an agent reads its
+    messages immediately before deciding what to do about them. Stating it every
+    time costs one line and removes any excuse for editing out of turn.
+    """
+    holder = baton_of(roster)
+    if holder == who:
+        return f"[baton: yours -- you are the one who edits files right now]"
+    return (f"[baton: {holder} -- do NOT edit files. Argue and propose instead. "
+            f"If the human just told YOU to make a change, run `claim` first.]")
+
+
+def cmd_wait(args) -> int:
+    """Block until somebody addresses this agent.
+
+    This is what lets an ordinary interactive session take part on its own: the
+    agent runs this, the command sits there until a message arrives, and the
+    agent then has something to answer. It always returns within --timeout so
+    the tab never looks wedged and the human can interrupt and type instead.
+    """
+    sd = state_dir()
+    who = args.who or me_id(load_roster(sd))
+    deadline = time.time() + args.timeout
+    while True:
+        msgs = read_new(sd, who)
+        if msgs:
+            roster = load_roster(sd)
+            if args.json:
+                print(json.dumps({"baton": baton_of(roster), "you": who,
+                                  "messages": msgs}, indent=2))
+            else:
+                print(baton_banner(roster, who) + NL * 2 + render(msgs))
+            return 0
+        if time.time() >= deadline:
+            emit(args, {"messages": []},
+                 f"(nothing addressed to {who} in {args.timeout}s "
+                 f"-- run wait again to keep listening)")
+            return 0
+        time.sleep(args.poll)
+
+
+def cmd_claim(args) -> int:
+    """Take the write baton, because the human just gave you an instruction.
+
+    The baton is meant to follow the human's attention: whoever they are
+    talking to is the one who edits. Nothing outside the tabs can observe that
+    -- only the agent being typed at knows it is being typed at -- so claiming
+    is how that fact gets into shared state where the others can see it.
+    """
+    sd = state_dir()
+    roster = load_roster(sd)
+    who = args.who or me_id(roster)
+    if who not in roster["partners"]:
+        known = ", ".join(roster["partners"]) or "none"
+        emit(args, {"error": "unknown"}, f"no agent named {who}; known: {known}")
+        return 1
+    prev = baton_of(roster)
+    if prev == who:
+        emit(args, {"baton": who, "changed": False},
+             f"baton: already yours ({who}) -- go ahead")
+        return 0
+    roster["baton"] = who
+    save_roster(sd, roster)
+    append_msg(sd, "system", "@all",
+               f"**{who}** was given an instruction directly by the human and has "
+               f"taken the write baton from **{prev}**. {who} edits files from now "
+               f"on; everyone else advises until the human turns to them.", who)
+    emit(args, {"baton": who, "previous": prev, "changed": True},
+         f"baton: {prev} -> {who} (you may edit now)")
+    return 0
+
+
 # --------------------------------------------------------------------------
-# provider registry
+# providers
 # --------------------------------------------------------------------------
-# Each provider describes how to run ONE debate round as a headless invocation.
+# Each provider needs one thing: how to start its normal interactive session
+# with a starting prompt and without stopping to ask permission for routine
+# work. Nothing is run headlessly, so there are no session ids to track and no
+# output formats to parse -- which is why an unlisted CLI needs only a template.
 #
-# The transcript is the memory. A provider that can resume its own session
-# (claude) gets continuity for free; everything else re-reads the last few
-# transcript messages in its prompt and loses nothing important. That is why
-# adding a new CLI here only requires knowing how to send it one prompt --
-# no session plumbing, no streaming parser.
+# AUTO LEVELS
+#   ask    leave the CLI's own prompting alone
+#   edits  auto-accept file edits, still sandboxed        (default)
+#   full   no prompts and no sandbox
 #
-# `readonly` decides the sandbox flag for THIS round. It is derived from the
-# baton, so write capability is symmetric between partners and moves with
-# whoever the user is addressing.
+# Flags verified against claude 2.x and codex 0.5x. They drift between
+# releases; this table is the single place to correct them.
 
 EFFORT_HINT = {
-    "low": "Answer directly; keep reasoning brief.",
-    "medium": "Think it through before answering.",
+    "low": "Answer directly and keep reasoning brief.",
+    "medium": "Think things through before answering.",
     "high": "Think hard. Consider at least two alternatives before answering.",
-    "max": "Ultrathink. Stress-test your own position before answering.",
+    "max": "Ultrathink. Stress-test your own position before you put it forward.",
 }
 
+AUTO_LEVELS = ("ask", "edits", "full")
 
-def _claude_round(c: dict) -> list[str]:
-    argv = ["claude", "-p", "--output-format", "json"]
+
+def _claude_tui(c: dict) -> list[str]:
+    argv = ["claude"]
     if c["model"]:
         argv += ["--model", c["model"]]
-    if c["session"]:
-        argv += ["--resume", c["session"]]
-    argv += ["--permission-mode", "plan" if c["readonly"] else "acceptEdits"]
-    return argv + [c["msg"]]
+    mode = {"edits": "acceptEdits", "full": "bypassPermissions"}.get(c["auto"])
+    if mode:
+        argv += ["--permission-mode", mode]
+    return argv + [c["prompt"]]
 
 
-def _codex_round(c: dict) -> list[str]:
-    argv = ["codex", "exec", "--skip-git-repo-check",
-            "--sandbox", "read-only" if c["readonly"] else "workspace-write"]
+def _codex_tui(c: dict) -> list[str]:
+    argv = ["codex"]
     if c["model"]:
         argv += ["-m", c["model"]]
     if c["effort"]:
         argv += ["-c", f'model_reasoning_effort="{c["effort"]}"']
-    return argv + [c["msg"]]
+    if c["auto"] == "edits":
+        argv += ["-a", "never", "-s", "workspace-write"]
+    elif c["auto"] == "full":
+        argv += ["--dangerously-bypass-approvals-and-sandbox"]
+    return argv + [c["prompt"]]
 
 
-def _gemini_round(c: dict) -> list[str]:
+def _gemini_tui(c: dict) -> list[str]:
     argv = ["gemini"]
     if c["model"]:
         argv += ["-m", c["model"]]
-    if not c["readonly"]:
-        argv += ["--approval-mode", "yolo"]
-    return argv + ["-p", c["msg"]]
+    mode = {"edits": "auto_edit", "full": "yolo"}.get(c["auto"])
+    if mode:
+        argv += ["--approval-mode", mode]
+    return argv + ["-i", c["prompt"]]
 
 
 PROVIDERS: dict[str, dict] = {
-    "claude": {"bin": "claude", "round": _claude_round, "resume": "id",
-               "effort": "prompt",
-               "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]},
-    "codex":  {"bin": "codex", "round": _codex_round, "resume": "none",
-               "effort": "flag", "models": ["gpt-5-codex", "gpt-5"]},
-    "gemini": {"bin": "gemini", "round": _gemini_round, "resume": "none",
-               "effort": "prompt", "models": ["gemini-2.5-pro", "gemini-2.5-flash"]},
+    "claude": {"bin": "claude", "tui": _claude_tui, "effort": "prompt",
+               "models": ["claude-opus-5", "claude-sonnet-5",
+                          "claude-haiku-4-5-20251001"]},
+    "codex": {"bin": "codex", "tui": _codex_tui, "effort": "flag",
+              "models": ["gpt-5-codex", "gpt-5"]},
+    "gemini": {"bin": "gemini", "tui": _gemini_tui, "effort": "prompt",
+               "models": ["gemini-2.5-pro", "gemini-2.5-flash"]},
 }
 
 
-def custom_round(template: str, c: dict) -> list[str]:
+def _custom_tui(template: str, c: dict) -> list[str]:
     """Any CLI, described by a template string.
 
-    Placeholders: {msg} {model} {effort} {readonly}
-    e.g.  --provider custom --cmd 'aider --model {model} --message {msg}'
-    A template without {msg} gets the prompt appended as the last argument.
+    Placeholders: {prompt} {model} {effort} {auto}
+    e.g. --cmd 'aider --model {model} --yes --message {prompt}'
+    A template without {prompt} gets the starting prompt appended last.
     """
-    import shlex
-    parts = shlex.split(template)
-    out, saw_msg = [], False
-    for p in parts:
-        if "{msg}" in p:
-            saw_msg = True
-        out.append(
-            p.replace("{msg}", c["msg"])
-             .replace("{model}", c["model"] or "")
-             .replace("{effort}", c["effort"] or "")
-             .replace("{readonly}", "1" if c["readonly"] else "0")
-        )
-    out = [p for p in out if p != ""]
-    if not saw_msg:
-        out.append(c["msg"])
+    out, saw = [], False
+    for part in shlex.split(template):
+        if "{prompt}" in part:
+            saw = True
+        out.append(part.replace("{prompt}", c["prompt"])
+                       .replace("{model}", c["model"] or "")
+                       .replace("{effort}", c["effort"] or "")
+                       .replace("{auto}", c["auto"] or ""))
+    out = [x for x in out if x != ""]
+    if not saw:
+        out.append(c["prompt"])
     return out
 
 
-def build_round(p: dict, msg: str, readonly: bool, session: str | None) -> list[str]:
-    c = {"msg": msg, "model": p.get("model") or "", "effort": p.get("effort") or "",
-         "readonly": readonly, "session": session}
-    prov = p["provider"]
-    if prov == "custom":
-        return custom_round(p.get("cmd") or "", c)
-    spec = PROVIDERS.get(prov)
+def build_tui(p: dict, prompt: str) -> list[str]:
+    c = {"prompt": prompt, "model": p.get("model") or "",
+         "effort": p.get("effort") or "", "auto": p.get("auto") or "edits"}
+    if p["provider"] == "custom":
+        return _custom_tui(p.get("cmd") or "", c)
+    spec = PROVIDERS.get(p["provider"])
     if not spec:
-        raise SystemExit(f"unknown provider {prov!r}; known: {', '.join(PROVIDERS)}, custom")
-    return spec["round"](c)
+        raise SystemExit(f"unknown provider {p['provider']!r}")
+    return spec["tui"](c)
 
 
 def provider_spec(prov: str) -> dict:
-    return PROVIDERS.get(prov, {"resume": "none", "effort": "prompt", "bin": None})
-
-
-def _deep_find(obj, names: set[str]):
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k in names and isinstance(v, str) and v:
-                return v
-            found = _deep_find(v, names)
-            if found:
-                return found
-    elif isinstance(obj, list):
-        for v in obj:
-            found = _deep_find(v, names)
-            if found:
-                return found
-    return None
-
-
-def parse_output(prov: str, stdout: str) -> tuple[str, str | None]:
-    """Return (reply_text, session_id). Falls back to raw stdout for any CLI."""
-    text, session = stdout.strip(), None
-    if prov == "claude":
-        try:
-            data = json.loads(stdout)
-            text = (data.get("result") or "").strip() or text
-            session = _deep_find(data, {"session_id", "sessionId"})
-        except json.JSONDecodeError:
-            pass
-    else:
-        for line in stdout.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    session = session or _deep_find(
-                        json.loads(line),
-                        {"session_id", "conversation_id", "thread_id"})
-                except json.JSONDecodeError:
-                    pass
-    return text, session
+    return PROVIDERS.get(prov, {"effort": "prompt", "bin": None, "models": []})
 
 
 # --------------------------------------------------------------------------
 # terminal tabs
 # --------------------------------------------------------------------------
-# Quoting a nested agent command through wt.exe / osascript / gnome-terminal
-# is where cross-platform launchers normally rot. We sidestep it entirely:
-# write the real command into a per-partner run script, then every terminal
-# only ever has to run one plain file path.
+# Quoting a nested agent command through wt.exe / osascript / gnome-terminal is
+# where cross-platform launchers normally rot. We sidestep it entirely: write
+# the real command into a per-agent run script, then every terminal only ever
+# has to run one plain file path.
 
 def write_runner(pdir: Path, argv: list[str], cwd: Path) -> Path:
-    import shlex
     if os.name == "nt":
         r = pdir / "run.cmd"
-        body = "@echo off\r\ncd /d \"{}\"\r\n{}\r\n".format(
-            cwd, subprocess.list2cmdline(argv))
-        r.write_text(body, encoding="utf-8")
+        r.write_text("@echo off\r\ncd /d \"{}\"\r\n{}\r\n".format(
+            cwd, subprocess.list2cmdline(argv)), encoding="utf-8")
     else:
         r = pdir / "run.sh"
-        r.write_text("#!/usr/bin/env bash\ncd {}\nexec {}\n".format(
-            shlex.quote(str(cwd)), shlex.join(argv)), encoding="utf-8")
+        r.write_text("#!/usr/bin/env bash{}cd {}{}exec {}{}".format(
+            NL, shlex.quote(str(cwd)), NL, shlex.join(argv), NL), encoding="utf-8")
         r.chmod(0o755)
     return r
 
@@ -451,12 +519,10 @@ def tab_command(title: str, runner: Path, cwd: Path) -> tuple[list[str], str] | 
         return ["cmd.exe", "/c", "start", title, "cmd.exe", "/k", r], "cmd window"
 
     if sys.platform == "darwin":
-        script = (
-            'tell application "iTerm2" to if it is running then\n'
-            f'  tell current window to create tab with default profile command "bash {r}"\n'
-            'end if'
-        )
         if Path("/Applications/iTerm.app").exists():
+            script = ('tell application "iTerm2" to if it is running then' + NL
+                      + '  tell current window to create tab with default profile '
+                      + f'command "bash {r}"' + NL + 'end if')
             return ["osascript", "-e", script], "iTerm2 tab"
         return ["osascript", "-e",
                 f'tell application "Terminal" to do script "bash {r}"',
@@ -489,160 +555,121 @@ def open_tab(title: str, runner: Path, cwd: Path) -> str:
 
 
 # --------------------------------------------------------------------------
-# one debate round
+# the briefing every agent is launched with
 # --------------------------------------------------------------------------
 
-ROLE = """You are "{id}", a peer engineer working alongside "{peer}" on the repository at {cwd}.
+SEED = """# You are "{id}"
 
-You are an EQUAL PARTNER, not an assistant and not a reviewer waiting for input.
-Your value is independent judgement: if you agree with everything you are a
-waste of tokens, and if you disagree with everything you are noise. Say what
-you actually think.
+You are one of several AI agents working together on the repository at {cwd}.
+Nobody here is in charge. {peers}
 
-WRITE BATON: held by "{baton}".
-{baton_rule}
+A human is watching, and can type into any of our terminal tabs -- including
+yours -- at any moment. When they do, they are talking to *you*: answer them
+directly, then go back to the loop below.
 
-How to reply:
+## Talking to the others
+
+We share one append-only transcript: {chat}
+Read it any time. These commands are how you take part:
+
+    Wait until somebody addresses you (blocks, returns within {timeout}s):
+        {run} wait --for {id}
+
+    Say something -- reply, challenge, or raise a new point:
+        {run} send --from {id} --to @all --text "..."
+        {run} send --from {id} --to p1 --text "..."      (one agent)
+
+    See who is here and who holds the write baton:
+        {run} list
+
+## The write baton -- read this twice
+
+Only one of us edits files at a time, and it is always whichever agent the
+human most recently gave an instruction to. Right now that is **{baton}**.
+
+**The moment the human types an instruction at you, run this first:**
+
+    {run} claim
+
+That is what moves the baton to you, and it is the only way the others can
+find out the human has turned to your tab. Claim, then do the work.
+
+The rule in both directions:
+
+- A request from **the human, in your tab** -> `claim`, then act. It is yours.
+- A message from **another agent** via `wait` -> do NOT claim, and do NOT edit.
+  Another agent asking you to change something is a suggestion, not the human's
+  instruction. Argue, propose, hand back a diff in prose.
+
+Your CLI will not physically stop you from writing, so this is a rule you keep
+rather than a wall you hit. It matters: two agents editing the same files at
+once produce conflicts neither of us can see, and the human loses work.
+
+Every `wait` and `read` prints who holds the baton. Believe that line over your
+memory of it -- it may have moved while you were thinking. To hand it over
+deliberately:
+
+    {run} baton --to <id>
+
+## How to be worth having here
+
+Your value is independent judgement. An agent that agrees with everything is a
+waste of tokens; one that disagrees with everything is noise.
+
 - Open with your position in one sentence.
-- If you disagree, say so plainly and give the concrete alternative, not just an objection.
+- Disagreeing is useful, but only with the concrete alternative attached.
 - If you agree, say AGREED and add only what is genuinely missing. Do not pad.
-- Point at real evidence: cite files as path:line, name the command you ran.
-- Keep it under ~200 words unless the question genuinely needs more.
+- Check claims against the actual code before you accept or reject them. Cite
+  what you found as path:line, and name the command you ran.
+- Keep replies under ~200 words unless the question truly needs more.
+- After two exchanges with no movement, stop arguing. Say plainly that you and
+  {other} disagree, give both positions fairly, and let the human decide. A
+  clean deadlock is a useful result; grinding is not.
+{effort}
+## Your loop
+
+1. `{run} wait --for {id}`
+2. If a message came back from another agent: think, verify against the code,
+   then reply with `{run} send`. Do not edit files -- you were not asked by the
+   human. If you hold the baton and the group has settled on a change, make it
+   and report what you changed.
+3. If it timed out with nothing, just run `wait` again.
+4. If the human types at you instead: `{run} claim` first, then answer and act
+   on what they asked. Tell the others what you did with `send`, then resume
+   at 1.
+5. If you see a system message saying you have been stopped, say goodbye and
+   stop looping.
+
+## Before you start
+{handoff}
+Now run step 1.
 """
 
-BATON_HOLDER = ("You hold the baton, so you are the one who edits files this round. "
-                "Make the change, then report what you changed.")
-BATON_OTHER = ("You do NOT hold the baton. Read, run read-only commands, and argue. "
-               "Do not modify files -- propose the change in prose or as a diff and "
-               "let the baton holder apply it.")
 
-
-def build_prompt(sd: Path, pid: str, p: dict, roster: dict, msgs: list[dict],
-                 include_tail: bool) -> str:
-    baton = baton_of(roster)
-    peers = [k for k in roster.get("partners", {}) if k != pid] or ["nobody yet"]
-    parts = [ROLE.format(id=pid, peer=", ".join(peers), cwd=repo_root(),
-                         baton=baton,
-                         baton_rule=BATON_HOLDER if baton == pid else BATON_OTHER)]
-
-    hint = EFFORT_HINT.get((p.get("effort") or "").lower())
-    if hint and provider_spec(p["provider"]).get("effort") == "prompt":
-        parts.append(hint)
-
-    first = not p.get("greeted")
-    if first:
-        handoff = sd / pid / "handoff.md"
-        if handoff.exists():
-            parts.append("## Context you are joining\n\n"
-                         + handoff.read_text(encoding="utf-8", errors="replace"))
-
-    # A partner can be spawned at any point, including into an argument that
-    # is already underway. On its first round it always gets the history --
-    # without it, it reopens questions the others already settled. After that,
-    # only providers that cannot resume their own session need it replayed.
-    if first or include_tail:
-        tail = tail_msgs(sd, 20 if first else 8)
-        # Exclude the new messages by identity, not by position: with several
-        # partners replying at once the newest entries in the transcript are
-        # not necessarily the ones addressed to this partner.
-        new_keys = {(m["ts"], m["from"], m["body"]) for m in msgs}
-        earlier = [m for m in tail
-                   if (m["ts"], m["from"], m["body"]) not in new_keys]
-        if earlier:
-            heading = ("## Debate you are joining, most recent last" if first
-                       else "## Conversation so far")
-            parts.append(heading + "\n\n" + "\n\n".join(
-                f"**{m['from']} -> {m['to']}:** {m['body']}" for m in earlier))
-
-    parts.append("## New messages addressed to you\n\n" + "\n\n".join(
-        f"**{m['from']}:** {m['body']}" for m in msgs))
-    return "\n\n".join(parts)
-
-
-def run_round(sd: Path, pid: str, roster: dict, msgs: list[dict], timeout: int) -> str:
+def build_seed(pid: str, roster: dict, root: Path, sd: Path,
+               script: Path, has_handoff: bool) -> str:
+    others = [k for k in roster["partners"] if k != pid]
+    peers = (f"Your partners are: {', '.join(others)}."
+             if others else "You are the first one here; others may join later.")
     p = roster["partners"][pid]
-    spec = provider_spec(p["provider"])
-    sess_f = sd / pid / "session"
-    session = sess_f.read_text(encoding="utf-8").strip() if (
-        spec.get("resume") == "id" and sess_f.exists()) else None
-
-    prompt = build_prompt(sd, pid, p, roster, msgs,
-                          include_tail=(spec.get("resume") != "id" or not session))
-    readonly = baton_of(roster) != pid
-    argv = build_round(p, prompt, readonly, session)
-
-    try:
-        proc = subprocess.run(argv, cwd=str(repo_root()), capture_output=True,
-                              text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout)
-    except FileNotFoundError:
-        return f"[partner error] `{argv[0]}` is not installed or not on PATH."
-    except subprocess.TimeoutExpired:
-        return f"[partner error] no reply within {timeout}s."
-
-    reply, new_sess = parse_output(p["provider"], proc.stdout)
-    if new_sess and spec.get("resume") == "id":
-        (sd / pid).mkdir(parents=True, exist_ok=True)
-        sess_f.write_text(new_sess, encoding="utf-8")
-    if not reply:
-        err = (proc.stderr or "").strip()[-800:]
-        reply = f"[partner error] empty reply (exit {proc.returncode}).\n{err}"
-    return reply
-
-
-# --- CONTRIBUTION POINT -----------------------------------------------------
-# TODO(user): decide when a partner should stop arguing and let the work move on.
-#
-# Called after each reply the partner produces. Return True to keep the
-# exchange open, False to end it (the partner falls silent until addressed
-# again). `consecutive` counts replies this partner has made without the
-# other side conceding or a new user question arriving.
-#
-# The trade-off: a low cap converges fast but lets whichever agent is more
-# confident win by attrition; a high cap surfaces real disagreement but burns
-# tokens and can deadlock two stubborn models on a point that does not matter.
-def should_continue_debate(reply: str, consecutive: int, max_rounds: int) -> bool:
-    if consecutive >= max_rounds:
-        return False
-    return "AGREED" not in reply.upper().split("\n")[0]
+    hint = EFFORT_HINT.get((p.get("effort") or "").lower())
+    effort = ""
+    if hint and provider_spec(p["provider"]).get("effort") == "prompt":
+        effort = f"- {hint}{NL}"
+    handoff = (f"{NL}Read {sd / pid / 'handoff.md'} first -- it says what was "
+               f"decided before you joined, and what is still open.{NL}"
+               if has_handoff else
+               f"{NL}Nothing has been decided yet.{NL}")
+    return SEED.format(
+        id=pid, cwd=root, peers=peers, chat=sd / "chat.md",
+        run=write_wrappers(sd, script), timeout=WAIT_TIMEOUT,
+        baton=baton_of(roster), other=", ".join(others) or "the others",
+        effort=effort, handoff=handoff)
 
 
 # --------------------------------------------------------------------------
-# spawn / watch
+# spawning
 # --------------------------------------------------------------------------
-
-SEED = """You are partner "{id}" in a multi-agent debate on the repo at {cwd}.
-
-Talk to the other agents through the shared transcript. From this directory:
-
-  Read anything new addressed to you:
-      python "{script}" read --for {id}
-  Reply or raise a point:
-      python "{script}" send --from {id} --to @all --text "..."
-  See who is here and who holds the write baton:
-      python "{script}" list
-
-The baton decides who edits files. If you do not hold it, argue and propose --
-do not write. Check `list` before you touch anything.
-
-Start by reading your inbox, then respond.
-"""
-
-
-def tui_argv(p: dict, seed: str) -> list[str]:
-    prov, model = p["provider"], p.get("model")
-    if prov == "custom":
-        return custom_round(p.get("cmd") or "", {
-            "msg": seed, "model": model or "", "effort": p.get("effort") or "",
-            "readonly": False, "session": None})
-    if prov == "claude":
-        return ["claude"] + (["--model", model] if model else []) + [seed]
-    if prov == "codex":
-        return ["codex"] + (["-m", model] if model else []) + [seed]
-    if prov == "gemini":
-        return ["gemini"] + (["-m", model] if model else []) + ["-i", seed]
-    return [PROVIDERS[prov]["bin"], seed]
-
 
 def cmd_spawn(args) -> int:
     root = repo_root()
@@ -652,25 +679,26 @@ def cmd_spawn(args) -> int:
     roster = load_roster(sd)
     pid = args.name or f"p{len(roster['partners']) + 1}"
     if pid in roster["partners"] and not args.replace:
-        emit(args, {"error": "exists"}, f"partner {pid!r} already exists; pass --replace")
+        emit(args, {"error": "exists"}, f"agent {pid!r} already exists; pass --replace")
         return 1
     if args.provider not in PROVIDERS and args.provider != "custom":
         emit(args, {"error": "provider"},
              f"unknown provider {args.provider!r}; known: {', '.join(PROVIDERS)}, custom")
         return 1
     if args.provider == "custom" and not args.cmd:
-        emit(args, {"error": "cmd"}, "--provider custom requires --cmd '<template with {msg}>'")
+        emit(args, {"error": "cmd"},
+             "--provider custom requires --cmd '<template containing {prompt}>'")
         return 1
 
     pdir = sd / pid
     pdir.mkdir(parents=True, exist_ok=True)
     entry = {"id": pid, "provider": args.provider, "model": args.model,
-             "effort": args.effort, "cmd": args.cmd, "mode": args.mode,
-             "status": "running", "started": utcnow(), "greeted": False}
+             "effort": args.effort, "cmd": args.cmd, "auto": args.auto,
+             "status": "running", "started": utcnow()}
     roster["partners"][pid] = entry
 
-    # Each partner keeps its own briefing: spawning p2 later must not clobber
-    # what p1 was told, and they may be joining for different reasons.
+    # Each agent keeps its own briefing: spawning a third must not clobber what
+    # the second was told, and they may be joining for different reasons.
     brief = []
     if args.context:
         ctx = Path(args.context)
@@ -678,19 +706,25 @@ def cmd_spawn(args) -> int:
                      if ctx.exists() else args.context)
     snap = repo_snapshot(root)
     if snap:
-        brief.append("## Working tree at the moment you joined\n\n" + snap)
+        brief.append("## Working tree at the moment you joined" + NL * 2 + snap)
+    hist = tail_msgs(sd, 20)
+    if hist:
+        brief.append("## Debate you are joining, most recent last" + NL * 2
+                     + render(hist))
     if brief:
-        (pdir / "handoff.md").write_text("\n\n".join(brief), encoding="utf-8")
+        (pdir / "handoff.md").write_text((NL * 2).join(brief), encoding="utf-8")
 
-    if args.mode == "tui":
-        seed_f = pdir / "seed.md"
-        seed_f.write_text(SEED.format(id=pid, cwd=root, script=Path(__file__).resolve()),
-                          encoding="utf-8")
-        argv = tui_argv(entry, seed_f.read_text(encoding="utf-8"))
-    else:
-        argv = [sys.executable, str(Path(__file__).resolve()), "watch",
-                "--id", pid, "--poll", str(args.poll)]
+    seed_f = pdir / "seed.md"
+    seed_f.write_text(build_seed(pid, roster, root, sd,
+                                 Path(__file__).resolve(), bool(brief)),
+                      encoding="utf-8")
 
+    # The starting prompt only points at the seed. Keeping it short avoids
+    # pushing a multi-kilobyte argument through a terminal command line.
+    boot = (f"Read {seed_f} and follow it exactly. It explains who you are, "
+            f"who you are working with, and how to talk to them. Begin now.")
+
+    argv = build_tui(entry, boot)
     runner = write_runner(pdir, argv, root)
     label = "" if args.no_tab else open_tab(f"partner:{pid}", runner, root)
     entry["tab"] = label
@@ -700,52 +734,21 @@ def cmd_spawn(args) -> int:
     manual = (f'cmd /c "{runner}"' if os.name == "nt" else f'bash "{runner}"')
     spec = (f"{args.provider}"
             f"{'/' + args.model if args.model else ''}"
-            f"{'/' + args.effort if args.effort else ''}")
+            f"{'/' + args.effort if args.effort else ''}"
+            f", auto={args.auto}")
     if label:
-        msg = f"partner {pid} ({spec}) started in {label}"
+        msg = f"{pid} ({spec}) started in {label}"
     elif args.no_tab:
-        msg = f"partner {pid} ({spec}) registered. Start it with:\n  {manual}"
+        msg = f"{pid} ({spec}) registered. Start it with:{NL}  {manual}"
     else:
-        msg = (f"partner {pid} ({spec}) registered, but no terminal could be "
-               f"opened.\nOpen a tab yourself and run:\n  {manual}")
-    emit(args, {**entry, "manual_command": manual}, msg)
+        msg = (f"{pid} ({spec}) registered, but no terminal could be opened."
+               f"{NL}Open a tab yourself and run:{NL}  {manual}")
+    emit(args, {**entry, "manual_command": manual, "seed": str(seed_f)}, msg)
     return 0
 
 
-def cmd_watch(args) -> int:
-    sd = state_dir()
-    pid = args.id
-    consecutive = 0
-    print(f"[partner {pid}] watching {sd / 'chat.md'} -- Ctrl-C to stop, "
-          f"then run the provider directly for an interactive session.\n", flush=True)
-    while True:
-        roster = load_roster(sd)
-        p = roster["partners"].get(pid)
-        if not p or p.get("status") == "stopped":
-            print(f"[partner {pid}] stopped.", flush=True)
-            return 0
-        msgs = read_new(sd, pid)
-        if msgs:
-            print(f"[partner {pid}] {len(msgs)} new message(s); thinking...", flush=True)
-            reply = run_round(sd, pid, roster, msgs, args.timeout)
-            append_msg(sd, pid, msgs[-1]["from"], reply, baton_of(roster))
-            (sd / pid / "log").open("a", encoding="utf-8").write(
-                f"\n--- {utcnow()} ---\n{reply}\n")
-            print(reply + "\n", flush=True)
-            roster = load_roster(sd)
-            if pid in roster["partners"]:
-                roster["partners"][pid]["greeted"] = True
-                save_roster(sd, roster)
-            consecutive += 1
-            if not should_continue_debate(reply, consecutive, args.max_rounds):
-                consecutive = 0
-        else:
-            consecutive = 0
-        time.sleep(args.poll)
-
-
 # --------------------------------------------------------------------------
-# messaging + roster commands
+# messaging + roster
 # --------------------------------------------------------------------------
 
 def cmd_send(args) -> int:
@@ -768,7 +771,7 @@ def cmd_send(args) -> int:
 
     running = [k for k, v in roster["partners"].items()
                if v.get("status") == "running" and k != args.sender
-               and v.get("mode") != "session"]
+               and k != me_id(roster)]
     expect = args.expect or (len(running) if args.to in ("@all", "all") else 1)
     deadline, seen = time.time() + args.wait, {}
     while time.time() < deadline:
@@ -781,23 +784,24 @@ def cmd_send(args) -> int:
         time.sleep(1.5)
 
     replies = list(seen.values())
-    text = "\n\n".join(f"### {m['from']}\n\n{m['body']}" for m in replies) or \
-        f"(no reply within {args.wait}s -- check the partner tab)"
+    text = render(replies) or (
+        f"(no reply within {args.wait}s -- check the agent tabs; "
+        f"they answer when they next run `wait`)")
     emit(args, {"replies": replies}, text)
     return 0
 
 
 def cmd_read(args) -> int:
     sd = state_dir()
-    who = args.who or me_id(load_roster(sd))
+    roster = load_roster(sd)
+    who = args.who or me_id(roster)
     msgs = read_new(sd, who, advance=not args.peek)
     if args.json:
-        print(json.dumps(msgs, indent=2))
-    elif not msgs:
-        print("(nothing new)")
+        print(json.dumps({"baton": baton_of(roster), "you": who,
+                          "messages": msgs}, indent=2))
     else:
-        for m in msgs:
-            print(f"### {m['ts']} {m['from']} -> {m['to']} (baton:{m['baton']})\n\n{m['body']}\n")
+        print(baton_banner(roster, who) + NL * 2
+              + (render(msgs) or "(nothing new)"))
     return 0
 
 
@@ -810,16 +814,15 @@ def cmd_list(args) -> int:
     holder = baton_of(roster)
     print(f"baton: {holder}   (only the baton holder edits files)")
     if not roster["partners"]:
-        print("no partners -- spawn one with: partner.py spawn --provider codex")
+        print("nobody here -- spawn someone with: partner.py spawn --provider codex")
         return 0
     me = me_id(roster)
     for pid, p in roster["partners"].items():
         mark = " <-- baton" if holder == pid else ""
         mark += "  (you)" if pid == me else ""
-        model = p.get("model") or "-"
-        effort = p.get("effort") or "-"
-        print(f"  {pid:8} {p['provider']:8} {model:22} effort={effort:6} "
-              f"{p.get('mode')}  [{p.get('status')}] {p.get('tab') or ''}{mark}")
+        print(f"  {pid:8} {p['provider']:8} {p.get('model') or '-':22} "
+              f"effort={p.get('effort') or '-':6} auto={p.get('auto') or '-':6}"
+              f"[{p.get('status')}] {p.get('tab') or ''}{mark}")
     return 0
 
 
@@ -849,10 +852,9 @@ def cmd_stop(args) -> int:
     roster = load_roster(sd)
     me = me_id(roster)
     if args.all:
-        # --all means every spawned agent. This session has no tab to close and
-        # stopping it would leave the transcript with no reader.
-        targets = [k for k, v in roster["partners"].items()
-                   if k != me and v.get("mode") != "session"]
+        # --all means every agent you spawned. This session has no tab to close
+        # and stopping it would leave the transcript with nobody reading it.
+        targets = [k for k in roster["partners"] if k != me]
     else:
         targets = [args.id] if args.id else []
     if not targets:
@@ -864,21 +866,21 @@ def cmd_stop(args) -> int:
     if roster.get("baton") in targets:
         roster["baton"] = me
     save_roster(sd, roster)
-    append_msg(sd, "system", "@all", f"Stopped: {', '.join(targets)}.",
+    append_msg(sd, "system", "@all",
+               f"Stopped: {', '.join(targets)}. Say goodbye and stop looping.",
                baton_of(roster))
-    emit(args, {"stopped": targets}, f"stopped {', '.join(targets)} (close their tabs)")
+    emit(args, {"stopped": targets},
+         f"stopped {', '.join(targets)} -- they exit at their next `wait`; "
+         f"close their tabs when they do")
     return 0
 
 
 def cmd_providers(args) -> int:
-    rows = []
-    for name, spec in PROVIDERS.items():
-        rows.append({"provider": name, "installed": _has(spec["bin"]),
-                     "models": spec["models"],
-                     "effort": "native flag" if spec["effort"] == "flag" else "prompt hint",
-                     "resume": spec["resume"]})
-    rows.append({"provider": "custom", "installed": None,
-                 "models": [], "effort": "template", "resume": "none"})
+    rows = [{"provider": n, "installed": _has(s["bin"]), "models": s["models"],
+             "effort": "native flag" if s["effort"] == "flag" else "prompt hint"}
+            for n, s in PROVIDERS.items()]
+    rows.append({"provider": "custom", "installed": None, "models": [],
+                 "effort": "template"})
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -896,7 +898,8 @@ def emit(args, data: dict, human: str) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="partner.py", description="Peer AI debate partners.")
+    ap = argparse.ArgumentParser(prog="partner.py",
+                                 description="Equal AI partners on one repo.")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -905,29 +908,29 @@ def main() -> int:
     i.add_argument("--me-provider", default=None)
     i.add_argument("--me-model", default=None)
     i.set_defaults(fn=cmd_init)
+
     sub.add_parser("providers").set_defaults(fn=cmd_providers)
     sub.add_parser("list").set_defaults(fn=cmd_list)
     sub.add_parser("snapshot").set_defaults(fn=cmd_snapshot)
 
-    sp = sub.add_parser("spawn", help="start a partner in a new terminal tab")
+    sp = sub.add_parser("spawn", help="start an agent in a new terminal tab")
     sp.add_argument("--provider", required=True)
     sp.add_argument("--model", default=None)
     sp.add_argument("--effort", default=None, choices=["low", "medium", "high", "max"])
-    sp.add_argument("--name", default=None, help="partner id (default p1, p2, ...)")
-    sp.add_argument("--mode", default="loop", choices=["loop", "tui"])
+    sp.add_argument("--auto", default="edits", choices=list(AUTO_LEVELS),
+                    help="permission prompting: ask | edits (default) | full")
+    sp.add_argument("--name", default=None, help="agent id (default p2, p3, ...)")
     sp.add_argument("--cmd", default=None, help="command template for --provider custom")
     sp.add_argument("--context", default=None, help="handoff text, or path to a file")
-    sp.add_argument("--poll", type=float, default=DEFAULT_POLL)
     sp.add_argument("--no-tab", action="store_true")
     sp.add_argument("--replace", action="store_true")
     sp.set_defaults(fn=cmd_spawn)
 
-    w = sub.add_parser("watch", help="internal: the loop that runs inside a tab")
-    w.add_argument("--id", required=True)
-    w.add_argument("--poll", type=float, default=DEFAULT_POLL)
-    w.add_argument("--timeout", type=int, default=600)
-    w.add_argument("--max-rounds", type=int, default=3)
-    w.set_defaults(fn=cmd_watch)
+    w = sub.add_parser("wait", help="block until somebody addresses you")
+    w.add_argument("--for", dest="who", default=None)
+    w.add_argument("--timeout", type=int, default=WAIT_TIMEOUT)
+    w.add_argument("--poll", type=float, default=WAIT_POLL)
+    w.set_defaults(fn=cmd_wait)
 
     s = sub.add_parser("send")
     s.add_argument("--from", dest="sender", default=None,
@@ -948,6 +951,10 @@ def main() -> int:
     b = sub.add_parser("baton")
     b.add_argument("--to", default=None)
     b.set_defaults(fn=cmd_baton)
+
+    cl = sub.add_parser("claim", help="take the baton: the human just told YOU to act")
+    cl.add_argument("--for", dest="who", default=None)
+    cl.set_defaults(fn=cmd_claim)
 
     st = sub.add_parser("stop")
     st.add_argument("--id", default=None)

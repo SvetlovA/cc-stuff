@@ -1,30 +1,12 @@
 # Transcript protocol
 
-Every agent — this session, each partner, and the tooling itself — communicates through one append-only file: `.partner/chat.md` at the repo root.
+Every agent — this session and each partner — communicates through one append-only file: `.partner/chat.md` at the repo root.
 
 A single shared transcript rather than per-partner channels is what makes group debate work: with three partners, everyone sees everyone's argument, so a point raised by `p2` can be answered by `p3` without anyone relaying it.
 
-## State layout
-
-```
-.partner/
-├── roster.json        every partner + the current baton holder
-├── chat.md            the shared transcript
-└── <id>/
-    ├── handoff.md     this partner's briefing, written at spawn time
-    ├── cursor         byte offset of the last message this partner consumed
-    ├── session        provider session id (only for resume-capable providers)
-    ├── run.sh|.cmd    the command its terminal tab runs
-    ├── seed.md        protocol briefing (tui mode only)
-    └── log            raw provider output, one block per round
-```
-
-`.partner/` is added to `.git/info/exclude` by `partner.py init`, so it is ignored locally without modifying a tracked `.gitignore`.
-
 ## Identity
 
-Every agent is an ordinary entry in `roster.json`, including the one that spawned the
-others. `roster.json` carries three things:
+Every agent is an ordinary entry in `roster.json`, including the one that spawned the others:
 
 ```json
 {
@@ -34,12 +16,50 @@ others. `roster.json` carries three things:
 }
 ```
 
-`self` is not a rank — it only records which entry belongs to the agent reading the
-file, so `send` and `read` can default `--from` and `--for` sensibly. The agent that
-ran `init` takes `p1`; spawned agents continue the numbering. `stop --all` stops every
-spawned agent and leaves the session's own entry alone, since it has no tab to close.
+`baton` names the agent the human most recently gave an instruction to, and it is the only agent that may edit files. See "How the baton moves" below.
+
+`self` is not a rank — it only records which entry belongs to the agent reading the file, so `send` and `read` can default `--from` and `--for` sensibly. Whoever runs `init` takes `p1`; spawned agents continue the numbering. `stop --all` stops every spawned agent and leaves the session's own entry alone, since it has no tab to close.
 
 The single asymmetry in the system is the baton, and it moves.
+
+## How the baton moves
+
+The baton is meant to track the human's attention: whoever they are talking to is whoever writes. No supervising process exists, and nothing outside a terminal tab can observe which tab is being typed into — so the agent that receives the instruction is the one that has to record it:
+
+```bash
+.partner/p.sh claim        # "the human just told me to do something"
+```
+
+`claim` sets the baton to the caller and announces the move in the transcript, so every other agent learns about it on its next `read` or `wait`.
+
+The distinction each agent is briefed on:
+
+| Where the request came from | What to do |
+|-----------------------------|------------|
+| The human, typing in this agent's tab | `claim`, then act |
+| Another agent, via `wait` | do not claim, do not edit — argue and propose |
+
+That second row is the load-bearing one. Without it, one agent could tell another to make a change and the baton would drift away from the human entirely.
+
+Every `read` and `wait` prints the current holder as its first line, which puts the reminder exactly where it is needed — an agent reads its inbox immediately before deciding what to do about it. `baton --to <id>` remains for deliberate handover.
+
+Because partners launch with permission prompting relaxed, this is a rule agents keep rather than a sandbox that stops them. It holds because every briefing carries the reason, not just the instruction: concurrent edits produce conflicts nobody can see.
+
+## State layout
+
+```
+.partner/
+├── roster.json        every agent, which one is you, who holds the write baton
+├── chat.md            the shared transcript
+├── p.cmd / p.sh       short wrapper -- how agents invoke partner.py
+└── <id>/
+    ├── seed.md        the briefing this agent was launched with
+    ├── handoff.md     what was decided before it joined
+    ├── cursor         byte offset of the last message it consumed
+    └── run.cmd|.sh    the exact command its terminal tab runs
+```
+
+`.partner/` is added to `.git/info/exclude` by `partner.py init`, so it is ignored locally without modifying a tracked `.gitignore`.
 
 ## Message format
 
@@ -53,56 +73,64 @@ Body text. Markdown, any length.
 
 - `from` — sender id: any agent id, or `system` for tooling notices such as a baton move.
 - `to` — an agent id, or `@all`.
-- `baton` — who held write permission when the message was written. Useful when reading history: it explains why a partner argued instead of editing.
+- `baton` — who held write permission when the message was written. Useful when reading history: it explains why an agent argued instead of editing.
 - `<!--/msg-->` — the record separator. It is an HTML comment, so `chat.md` still renders cleanly in any markdown viewer.
 
-Append only. Rewriting history breaks every partner's cursor and silently drops messages.
+Append only. Rewriting history breaks every agent's cursor and silently drops messages.
 
 ## Cursors
 
-Each partner tracks a byte offset into `chat.md`. `read --for <id>` returns messages after that offset that are addressed to `<id>` or `@all` and were not sent by `<id>` itself, then advances the offset.
+Each agent tracks a byte offset into `chat.md`. `read` and `wait` return messages after that offset that are addressed to it or `@all` and were not sent by it, then advance the offset.
 
-`--peek` reads without advancing — useful for inspecting what a partner is about to see without consuming it.
+`read --peek` reads without advancing — useful for inspecting what an agent is about to see without consuming it.
 
-Because the cursor is a byte offset rather than a message index, a partner that was stopped and restarted resumes exactly where it left off.
+Because the cursor is a byte offset rather than a message index, an agent that was closed and restarted resumes exactly where it left off.
 
-## Participating from inside a partner tab
+## How an agent takes part
 
-A partner in `--mode tui` drives the protocol with the same script. The seed prompt written to `.partner/<id>/seed.md` tells it:
+There is no supervising process. Each agent is an ordinary interactive session that drives itself, using the wrapper written at `.partner/p.cmd` (Windows) or `.partner/p.sh` (macOS/Linux):
 
 ```bash
-python <path>/partner.py read --for p1                       # what is new for me
-python <path>/partner.py send --from p1 --to @all --text ".." # say something
-python <path>/partner.py list                                 # who holds the baton
+.partner/p.sh wait --for p2                       # blocks until addressed
+.partner/p.sh send --from p2 --to @all --text ".."
+.partner/p.sh claim                               # the human just addressed me
+.partner/p.sh list                                # who is here, who holds the baton
 ```
 
-A partner in `--mode loop` never calls these itself — the watcher does it around each provider invocation.
+`wait` is what makes an interactive session autonomous. It polls the transcript and blocks until a message arrives for that agent, so the agent has something to answer rather than needing to be driven. It always returns within `--timeout` (default 120s) even when nothing arrives, which matters twice over: the tab never looks wedged, and the human can interrupt and type instead.
 
-## What a partner receives each round
+The briefing tells each agent to loop — `wait`, think, `send`, repeat — and to answer the human directly whenever they type into its tab, then resume.
 
-The watcher assembles a prompt containing:
+## What an agent is launched with
 
-1. **Role framing** — that it is an equal peer, not an assistant, and that agreeing with everything makes it useless.
-2. **Baton state** — who holds it, and whether this partner may edit files this round.
-3. **Effort hint** — for providers with no native effort flag.
-4. **Handoff context** — `<id>/handoff.md`, on the partner's first round only. Per partner, so a later spawn never overwrites an earlier partner's briefing.
-5. **The debate so far** — on the first round, the last 20 transcript messages regardless of provider, because a partner spawned into an argument in progress must see what is already settled. On later rounds, the last 8, and only for providers without session resume.
-6. **New messages** — what it is being asked right now.
+`.partner/<id>/seed.md` contains:
 
-The reply is appended to the transcript verbatim and mirrored to the tab, so the user can watch the debate as it happens.
+1. **Who it is** and who its partners are, stated as equals with nobody in charge.
+2. **That a human may type into its tab at any time**, and that it should answer them and then resume looping.
+3. **The commands** for `wait`, `send` and `list`, using the short wrapper.
+4. **The baton rule** — `claim` when the human addresses it, never when another agent does — with the reason: concurrent edits produce conflicts nobody can see.
+5. **How to argue well** — lead with a position, disagreement needs a concrete alternative, verify against the code, cite `path:line`, stop after two exchanges without movement.
+6. **The loop itself**, as numbered steps.
+7. **A pointer to its `handoff.md`**, which carries the working tree, the debate so far, and whatever briefing was written at spawn.
+
+The starting prompt passed on the command line only says "read `seed.md` and follow it", which keeps a multi-kilobyte briefing out of a terminal command line.
 
 ## Convergence
 
-After each reply the watcher calls `should_continue_debate(reply, consecutive, max_rounds)` in `partner.py`. It ends the exchange when the partner opens with `AGREED`, or after `--max-rounds` consecutive replies (default 3).
+There is no mechanical round limit, because no supervising process exists to enforce one. The briefing asks each agent to stop after two exchanges with no movement, state the disagreement fairly, and let the human decide.
 
-This is the tuning point for how stubborn partners are. A low cap converges quickly but lets whichever agent is more confident win by attrition; a high cap surfaces real disagreement but burns tokens and can deadlock two stubborn models on something that does not matter.
+That is the right place for the rule. A deadlock between two models is a genuine signal that the question is a judgement call, and the human is the one who should break it; grinding on produces confident-sounding convergence that reflects stamina rather than correctness.
 
 ## Failure modes
 
-**Interleaved writes.** Appends are single `open(..., "a")` writes, which are atomic for the sizes involved on all three platforms. Two partners replying in the same instant produce two well-formed adjacent records, not a corrupted one.
+**An agent reopening a settled question.** It joined without the history, or `--context` never said the question was closed. Check `.partner/<id>/handoff.md`.
 
-**A partner reopening a settled question.** It joined without the history, or `--context` never said the question was closed. Check `.partner/<id>/handoff.md`.
+**An agent talking to itself.** `read` and `wait` filter out messages the reader sent, so an agent cannot trigger its own next round.
 
-**A partner talking to itself.** `read` filters out messages the reader sent. A partner cannot trigger its own next round.
+**The baton drifting away from the human.** An agent claimed after being asked by another agent rather than by the human. Its briefing forbids this; check the transcript for the `system` message naming who claimed and when.
 
-**Runaway loops.** Two watchers addressing each other with `@all` will keep going until `max_rounds` stops them. When partners should debate each other directly, prefer explicit `--to <id>` addressing so the exchange has a clear owner.
+**An agent that stopped looping.** Interactive agents sometimes end their turn rather than running `wait` again. Type "continue" in its tab, or `send` it a message.
+
+**Interleaved writes.** Appends are single `open(..., "a")` writes, atomic at these sizes on all three platforms. Two agents replying in the same instant produce two well-formed adjacent records, not a corrupted one.
+
+**Runaway loops.** Two agents addressing each other with `@all` will keep going until one applies the two-exchange rule. When agents should debate each other directly, prefer explicit `--to <id>` addressing so the exchange has a clear owner.

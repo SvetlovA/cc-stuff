@@ -1,16 +1,18 @@
 # partner-agents
 
-Spawn peer AI agents into new terminal tabs and argue with them before you commit to anything.
+Run several AI agents as equal partners on one repo, each in its own terminal tab, and argue with them before you commit to anything.
 
 A partner is a **separate process** with its own provider, model, and context — not a subagent. Claude can run the debate against Codex, Gemini, or any CLI you can describe in one line, and the disagreement is the product: two models that differ surface the assumptions one model alone glides past.
 
 ## What it does
 
 - **Spawns partners into real terminal tabs** on Windows, macOS, and Linux — Windows Terminal, iTerm2, Terminal.app, GNOME Terminal, Konsole, WezTerm, kitty, tmux, and zellij are all detected automatically.
+- **Every partner is a full interactive session.** Walk into any tab and type at that agent directly — it answers you, then goes back to debating. Between your interruptions it drives itself.
+- **No permission dialogs to babysit.** Partners start with prompting relaxed (`--auto ask | edits | full`), so you are not approving edits in three tabs at once.
 - **Joins mid-work with the context intact.** Spawn a partner twenty exchanges into a hard problem and it arrives knowing the branch, the uncommitted diff, and the argument so far — plus whatever briefing you write. Each partner keeps its own, so adding a third never overwrites what the second was told.
 - **Debates every question.** Once a partner is running, the skill puts each question and decision to it, weighs the pushback against the actual code, and reports the argument rather than hiding it.
 - **No lead agent.** The session you are typing in registers itself as `p1`, an ordinary peer beside the ones it spawns. The only asymmetry is the write baton, and it moves.
-- **Enforces one writer.** All partners *can* edit files; only the one holding the **write baton** does. The baton follows whoever you are talking to, and it is applied as a real sandbox flag per round, not a polite request.
+- **Only the partner you just spoke to can write.** The write baton follows your attention: the moment you type an instruction into a tab, that agent claims it and the others are told to stop editing. A partner asking another partner to change something is a suggestion, not an instruction — it does not move the baton. Concurrent edits produce conflicts nobody can see.
 - **Runs as many partners as you want** — `p2`, `p3`, `p4` alongside you, each with its own provider, model and effort, all debating in one shared transcript.
 - **Keeps everything in plain markdown.** `.partner/chat.md` is the whole conversation, readable in any editor at any time.
 
@@ -33,7 +35,7 @@ cc --plugin-dir ./cc-stuff/partner-agents
 /partner                              # asks which provider, model, and effort
 /partner codex gpt-5-codex high       # or say it up front
 /partner list                         # who is running, who holds the baton
-/partner baton p2                     # let p2 do the editing
+/partner baton p2                     # hand editing to p2 deliberately
 /partner stop --all
 ```
 
@@ -41,17 +43,17 @@ Then just keep working. Every question after that gets debated before it gets an
 
 ## Providers
 
-| Provider | Effort control | Read-only enforcement |
-|----------|---------------|----------------------|
-| `claude` | prompt hint | `--permission-mode plan` |
-| `codex` | `model_reasoning_effort` (native) | `--sandbox read-only` |
-| `gemini` | prompt hint | default approval mode |
-| `custom` | template | your flag, via `{readonly}` |
+| Provider | Effort control | Auto-approval at `--auto edits` |
+|----------|---------------|----------------------------------|
+| `claude` | prompt hint | `--permission-mode acceptEdits` |
+| `codex` | `model_reasoning_effort` (native) | `-a never -s workspace-write` |
+| `gemini` | prompt hint | `--approval-mode auto_edit` |
+| `custom` | template | your own flag, in the template |
 
 Anything else works through a one-line template:
 
 ```bash
-/partner custom --cmd 'aider --model {model} --message {msg}'
+/partner custom --cmd 'aider --model {model} --yes --message {prompt}'
 ```
 
 `python partner.py providers` reports which are installed on the current machine.
@@ -67,12 +69,14 @@ A terminal is *not* required. Without one, partners still run; the skill prints 
 ## How it works
 
 ```
-        you
-         │
-    ┌────▼────┐   .partner/chat.md    ┌──────────┐
+     you ──────────────┬──────────────────┐
+      │   type in any tab; whoever you   │
+      │   address claims the write baton │
+      ▼                                  ▼
+    ┌─────────┐   .partner/chat.md    ┌──────────┐
     │   p1    │◄─────────────────────►│    p2    │  codex, own tab
-    │  this   │   append-only         │  watcher │
-    │ session │   shared transcript   │   loop   │
+    │  this   │   append-only         │  claude  │
+    │ session │   shared transcript   │  gemini  │
     └─────────┘                       └──────────┘
          ▲                                  ▲
          └──────── roster.json ─────────────┘
@@ -82,7 +86,7 @@ A terminal is *not* required. Without one, partners still run; the skill prints 
     is the only difference between them
 ```
 
-Each partner's tab runs a watcher that polls the transcript, and when something is addressed to it, invokes its provider for one headless round — read-only or writable depending on the baton — and appends the reply. The transcript is the shared memory, which is why a provider with no session-resume support loses nothing.
+Each tab runs the provider's ordinary interactive interface, started on a briefing that tells it to loop: block on `wait` until somebody addresses it, think, reply, repeat. Nothing runs headlessly and nothing supervises the agents, so there are no session ids to track and no output formats to parse — which is why any CLI that can run shell commands can join with a one-line template.
 
 ## Documentation
 
