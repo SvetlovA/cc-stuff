@@ -18,7 +18,7 @@ Every agent is an ordinary entry in `roster.json`, including the one that spawne
 
 `baton` names the agent the human most recently gave an instruction to, and it is the only agent that may edit files. See "How the baton moves" below.
 
-Whoever runs `init` takes `p1`; spawned agents continue the numbering. Every entry has the same shape — provider, model, effort, auto level, status — because `init` and `spawn` build them with the same code. The agent that starts the session is a participant, not the thing the others hang off.
+Whoever runs `init` takes `p1`; spawned agents continue the numbering. `spawn` calls `init` itself from its `--me-*` arguments, so registering yourself is never a separate step that can be completed on its own. Every entry has the same shape — provider, model, effort, auto level, status — because `init` and `spawn` build them with the same code. The agent that starts the session is a participant, not the thing the others hang off.
 
 ### Identity is per-process
 
@@ -76,7 +76,32 @@ Because partners launch with permission prompting relaxed, this is a rule agents
 
 Every agent has an `<id>/` directory, including the one that started the session. If one of them were missing a briefing or a wrapper, it would not be a peer.
 
+Past sessions live alongside, each a complete copy of the above:
+
+```
+.partner/sessions/20260905-185718/
+├── meta.json          id, label, agent configs, message count
+├── roster.json        who was in it
+├── chat.md            what they said
+└── <id>/              each agent's briefing as it stood
+```
+
 `.partner/` is added to `.git/info/exclude` by `partner.py init`, so it is ignored locally without modifying a tracked `.gitignore`.
+
+## Sessions
+
+A session is one arrangement of agents plus the transcript they produced. Starting a new one never destroys the old: `archive` moves the live session under `sessions/` whole — files moved, not copied and deleted — and leaves a clean slate. `spawn --fresh` does this as its first act, so a new invocation of the skill cannot silently overwrite the previous argument.
+
+`meta.json` records each agent's provider, model, effort and auto level, which is what makes rebuilding possible. The `label` is the first non-`system` message in the transcript, so a list of sessions reads as a list of questions rather than timestamps.
+
+`resume` restores a session and relaunches **every** agent from its roster entry — the same `relaunch()` path `spawn` uses, so a rebuilt agent is indistinguishable from a freshly created one. Two details make it continue rather than restart:
+
+- Each agent's `handoff.md` is rewritten from the restored transcript, so it knows what was already settled.
+- Each cursor is set to the end of that transcript. Without this an agent would find the entire history sitting in its inbox and try to answer all of it.
+
+A `system` message then announces the resume, which is the one new message every agent sees.
+
+Resuming archives whatever was live first, so switching between sessions never loses work. The agent running `resume` adopts the `kind: "session"` entry — a restored roster would otherwise still name the agent that created it, on a machine where that process no longer exists.
 
 ## Message format
 

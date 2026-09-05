@@ -242,7 +242,7 @@ def cmd_init(args) -> int:
             "model": getattr(args, "me_model", None),
             "effort": getattr(args, "me_effort", None),
             "auto": getattr(args, "me_auto", None) or "edits",
-            "cmd": None,
+            "cmd": None, "kind": "session",
             "status": "running", "started": utcnow(),
             "tab": "this session",
         }
@@ -914,7 +914,22 @@ def write_briefing(sd: Path, pid: str, roster: dict, root: Path, script: Path,
 def cmd_spawn(args) -> int:
     root = repo_root()
     sd = state_dir(root)
-    cmd_init(argparse.Namespace(json=False, quiet=True))
+    if getattr(args, "fresh", False):
+        # A new arrangement starts clean, but nothing is thrown away: the old
+        # session moves under sessions/ and can be resumed with its agents.
+        archived = archive_current(sd)
+        if archived and not getattr(args, "quiet", False):
+            print(f"archived previous session as {archived['id']} "
+                  f"({len(archived['agents'])} agents, "
+                  f"{archived['messages']} messages)")
+    # Register the caller as part of spawning, so "a partner is running" is one
+    # command rather than two. Splitting them left sessions that registered
+    # themselves, stopped, and never created anybody.
+    cmd_init(argparse.Namespace(
+        json=False, quiet=True,
+        me_provider=args.me_provider, me_model=args.me_model,
+        me_effort=args.me_effort, me_auto=args.me_auto, me_name=None,
+        context=None))
 
     roster = load_roster(sd)
     pid = args.name or f"p{len(roster['partners']) + 1}"
@@ -935,7 +950,7 @@ def cmd_spawn(args) -> int:
     pdir.mkdir(parents=True, exist_ok=True)
     entry = {"id": pid, "provider": args.provider, "model": args.model,
              "effort": args.effort, "cmd": args.cmd, "auto": args.auto,
-             "status": "running", "started": utcnow()}
+             "kind": "tab", "status": "running", "started": utcnow()}
     roster["partners"][pid] = entry
 
     # Same writer `init` uses for the agent that started the session. Briefing
@@ -975,7 +990,222 @@ def cmd_spawn(args) -> int:
     else:
         msg = (f"{pid} ({spec}) registered, but no terminal could be opened."
                f"{NL}Open a tab yourself and run:{NL}  {manual}")
-    emit(args, {**entry, "manual_command": manual, "seed": str(seed_f)}, msg)
+    live = [k for k, v in roster["partners"].items() if v.get("status") == "running"]
+    if label:
+        msg += (f"{NL}{len(live)} agents now running: {', '.join(live)}. "
+                f"You are {me_id(roster)}, and you hold the baton.")
+    emit(args, {**entry, "manual_command": manual, "seed": str(seed_f),
+                "running": live}, msg)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# sessions
+# --------------------------------------------------------------------------
+# A session is one arrangement of agents plus the transcript they produced.
+# Starting a new one never destroys the old: it is moved under sessions/ whole,
+# so it can be brought back with its agents and its argument intact.
+
+def sessions_dir(sd: Path) -> Path:
+    return sd / "sessions"
+
+
+def agent_dirs(sd: Path) -> list[Path]:
+    """Per-agent directories in the live session, skipping sessions/ itself."""
+    return [d for d in sd.iterdir()
+            if d.is_dir() and d.name != "sessions" and (d / "seed.md").exists()]
+
+
+def session_label(sd: Path, roster: dict) -> str:
+    """A human-recognisable name: the first real thing anybody said."""
+    for m in tail_msgs(sd, 200):
+        if m["from"] != "system":
+            line = " ".join(m["body"].split())
+            return (line[:70] + "...") if len(line) > 70 else line
+    ids = ", ".join(roster.get("partners", {}))
+    return f"no discussion ({ids})" if ids else "empty"
+
+
+def archive_current(sd: Path, label: str | None = None) -> dict | None:
+    """Move the live session under sessions/ and leave the slate clean."""
+    roster = load_roster(sd)
+    chat = sd / "chat.md"
+    if not roster["partners"] and not chat.exists():
+        return None
+
+    sid = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = sessions_dir(sd) / sid
+    n = 2
+    while dest.exists():
+        dest = sessions_dir(sd) / f"{sid}-{n}"
+        n += 1
+    dest.mkdir(parents=True)
+
+    msgs = tail_msgs(sd, 100000)
+    meta = {
+        "id": dest.name,
+        "archived": utcnow(),
+        "label": label or session_label(sd, roster),
+        "messages": len(msgs),
+        "agents": {pid: {k: p.get(k) for k in
+                         ("provider", "model", "effort", "auto", "cmd", "kind")}
+                   for pid, p in roster["partners"].items()},
+    }
+    (dest / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    for item in [sd / "roster.json", chat]:
+        if item.exists():
+            shutil.move(str(item), str(dest / item.name))
+    for d in agent_dirs(sd):
+        shutil.move(str(d), str(dest / d.name))
+    return meta
+
+
+def cmd_archive(args) -> int:
+    sd = state_dir()
+    meta = archive_current(sd, args.label)
+    if not meta:
+        emit(args, {"archived": None}, "nothing to archive")
+        return 0
+    emit(args, meta,
+         f"archived as {meta['id']} "
+         f"({len(meta['agents'])} agents, {meta['messages']} messages)"
+         f"{NL}  {meta['label']}")
+    return 0
+
+
+def read_sessions(sd: Path) -> list[dict]:
+    root = sessions_dir(sd)
+    if not root.exists():
+        return []
+    out = []
+    for d in sorted(root.iterdir(), reverse=True):
+        f = d / "meta.json"
+        if not f.exists():
+            continue
+        try:
+            out.append(json.loads(f.read_text(encoding="utf-8")))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def cmd_sessions(args) -> int:
+    sd = state_dir()
+    past = read_sessions(sd)
+    roster = load_roster(sd)
+    live = {"id": "current", "agents": roster.get("partners", {}),
+            "messages": len(tail_msgs(sd, 100000)),
+            "label": session_label(sd, roster) if roster.get("partners") else "empty"}
+    if args.json:
+        print(json.dumps({"current": live, "archived": past}, indent=2))
+        return 0
+    print(f"current   {len(live['agents'])} agents, {live['messages']} messages"
+          f"   {live['label']}")
+    if not past:
+        print("no archived sessions")
+        return 0
+    for m in past:
+        ids = ", ".join(m.get("agents", {})) or "-"
+        print(f"{m['id']}   {len(m.get('agents', {}))} agents, "
+              f"{m.get('messages', 0)} messages   [{ids}]")
+        print(f"{'':17} {m.get('label', '')}")
+    return 0
+
+
+def relaunch(sd: Path, pid: str, roster: dict, root: Path, script: Path,
+             no_tab: bool = False) -> tuple[str, Path]:
+    """Start an agent from its roster entry rather than from CLI arguments.
+
+    Resuming has to rebuild agents it did not create, so the launch path takes
+    a roster entry as its input; `spawn` fills one in and calls the same code.
+    """
+    entry = roster["partners"][pid]
+    pdir = sd / pid
+    pdir.mkdir(parents=True, exist_ok=True)
+    seed_f = write_briefing(sd, pid, roster, root, script, None,
+                            kind=entry.get("kind") or "tab")
+    boot = (f"Read {seed_f} and follow it exactly. It explains who you are, "
+            f"who you are working with, and how to talk to them. Begin now.")
+    argv = build_tui(entry, boot)
+    runner = write_runner(pdir, argv, root)
+    label = "" if no_tab else open_tab(f"partner:{pid}", runner, root)
+    entry["tab"] = label
+    entry["runner"] = str(runner)
+    entry["status"] = "running"
+    return label, runner
+
+
+def cmd_resume(args) -> int:
+    """Bring a session back, or restart the agents of the current one.
+
+    Either way every agent is recreated and re-briefed from the transcript, so
+    the argument continues where it stopped instead of starting over.
+    """
+    root = repo_root()
+    sd = state_dir(root)
+    script = Path(__file__).resolve()
+
+    if args.session:
+        src = sessions_dir(sd) / args.session
+        if not src.exists():
+            known = ", ".join(m["id"] for m in read_sessions(sd)) or "none"
+            emit(args, {"error": "unknown"},
+                 f"no session '{args.session}'. Archived: {known}")
+            return 1
+        archive_current(sd)                       # never lose what was live
+        for item in src.iterdir():
+            if item.name == "meta.json":
+                continue
+            target = sd / item.name
+            if target.exists():
+                shutil.rmtree(target) if target.is_dir() else target.unlink()
+            shutil.copytree(str(item), str(target)) if item.is_dir() \
+                else shutil.copy2(str(item), str(target))
+
+    roster = load_roster(sd)
+    if not roster["partners"]:
+        emit(args, {"error": "empty"},
+             "nothing to resume -- start one with: partner.py spawn --provider ...")
+        return 1
+
+    # Whoever is running this adopts the session-kind entry; a restored roster
+    # would otherwise still name the agent that created it.
+    me = next((p for p, v in roster["partners"].items()
+               if (v.get("kind") or ("session" if v.get("tab") == "this session"
+                                     else "tab")) == "session"), None)
+    if me:
+        roster["self"] = me
+        roster["partners"][me]["kind"] = "session"
+        roster["partners"][me]["status"] = "running"
+        roster["partners"][me]["tab"] = "this session"
+        write_wrappers(sd, script, me)
+        write_briefing(sd, me, roster, root, script, None, kind="session")
+
+    # History belongs in the briefing, not the inbox: an agent that finds 200
+    # old messages waiting will try to answer all of them.
+    end = (sd / "chat.md").stat().st_size if (sd / "chat.md").exists() else 0
+    started = []
+    for pid, entry in roster["partners"].items():
+        if pid == me:
+            continue
+        entry.setdefault("kind", "tab")
+        label, _ = relaunch(sd, pid, roster, root, script, args.no_tab)
+        started.append(f"{pid} ({entry.get('provider')}"
+                       f"{'/' + entry['model'] if entry.get('model') else ''})"
+                       f"{' -> ' + label if label else ''}")
+        (sd / pid / "cursor").write_text(str(end), encoding="utf-8")
+
+    write_wrappers(sd, script)
+    save_roster(sd, roster)
+    what = f"session {args.session}" if args.session else "the current session"
+    append_msg(sd, "system", "@all",
+               f"{what.capitalize()} resumed by **{me or me_id(roster)}**. "
+               f"Everyone has been re-briefed from the transcript above -- pick up "
+               f"where we stopped rather than starting over.", baton_of(roster))
+    emit(args, {"resumed": args.session or "current", "started": started,
+                "self": me},
+         f"resumed {what}" + NL + NL.join(f"  {x}" for x in started))
     return 0
 
 
@@ -1169,7 +1399,28 @@ def main() -> int:
     sp.add_argument("--replace", action="store_true")
     sp.add_argument("--force", action="store_true",
                     help="use a model the known list has not caught up with")
+    sp.add_argument("--me-provider", default=None,
+                    help="the CLI you yourself are running in")
+    sp.add_argument("--me-model", default=None, help="your own model id")
+    sp.add_argument("--me-effort", default=None,
+                    choices=["low", "medium", "high", "max"])
+    sp.add_argument("--me-auto", default=None, choices=list(AUTO_LEVELS))
+    sp.add_argument("--fresh", action="store_true",
+                    help="archive the current session and start a new one")
     sp.set_defaults(fn=cmd_spawn)
+
+    ar = sub.add_parser("archive", help="file the current session away")
+    ar.add_argument("--label", default=None, help="a name you will recognise later")
+    ar.set_defaults(fn=cmd_archive)
+
+    sub.add_parser("sessions", help="list the current and archived sessions"
+                   ).set_defaults(fn=cmd_sessions)
+
+    rs = sub.add_parser("resume", help="restart the agents of a session")
+    rs.add_argument("--session", default=None,
+                    help="archived session id; omit to continue the current one")
+    rs.add_argument("--no-tab", action="store_true")
+    rs.set_defaults(fn=cmd_resume)
 
     ck = sub.add_parser("check", help="validate a config without starting anything")
     ck.add_argument("--provider", required=True)

@@ -6,7 +6,7 @@ A public collection of Claude Code plugins for developer workflows. Install any 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 0.4.0 |
+| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 0.6.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.6.1 |
 
 ## Installing a Plugin
@@ -41,6 +41,9 @@ Runs several AI agents as equal partners, each in its own terminal tab, so decis
 - Puts **every question and decision** to the partners, weighs the pushback against the code, and reports the disagreement instead of hiding it
 - Keeps a **write baton** that follows your attention: type into a tab and that agent claims it, so only the partner you just spoke to edits files — one partner telling another to change something does not move it
 - Runs **as many partners as you want**, all debating in one shared `.partner/chat.md` transcript
+
+- One `spawn` call registers you **and** starts the partner, so the arrangement cannot be left half-built
+- **Session history**: each new arrangement archives the last one whole; `resume` rebuilds every agent with its model and re-briefs it from the transcript, continuing the argument rather than restarting it
 
 **Invoke with:** `/partner [provider] [model] [effort]`, plus `/partner list`, `/partner baton <id>`, `/partner stop`
 
