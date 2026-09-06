@@ -1,7 +1,7 @@
 {
   "name": "partner-agents",
-  "version": "0.12.0",
-  "description": "Run several AI agents (Claude, Codex, Gemini, or any CLI) as equal partners, each in its own terminal tab, debating every decision through a shared transcript with an exclusive write baton.",
+  "version": "0.13.0",
+  "description": "Run several AI agents (whatever agent CLIs your machine has, plus any you describe) as equal partners, each in its own terminal tab, debating every decision through a shared transcript with an exclusive write baton. Providers and models are discovered on the machine, never read off a bundled list.",
   "author": {
     "name": "SvetlovA",
     "url": "https://github.com/SvetlovA"
@@ -20,6 +20,8 @@
     "orca",
     "validation",
     "sessions",
-    "resume"
+    "resume",
+    "discovery",
+    "any-cli"
   ]
 }

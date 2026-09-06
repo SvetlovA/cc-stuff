@@ -7,12 +7,12 @@
     {
       "name": "partner-agents",
       "source": "./partner-agents",
-      "description": "Run AI agents (Claude, Codex, Gemini, or any CLI) as equal partners in their own terminal tabs — Orca-aware — debating every decision through a shared transcript, with a write baton that follows whoever you are talking to"
+      "description": "Run AI agents as equal partners in their own terminal tabs, debating every decision, with an exclusive write baton and providers/models discovered on your machine"
     },
     {
       "name": "pr-review-toolkit",
       "source": "./pr-review-toolkit",
-      "description": "Address GitHub PR review comments — fetch active threads, recommend plan vs. on-the-fly mode, apply code fixes, resolve or reply, then commit"
+      "description": "Address GitHub PR review comments \u2014 fetch active threads, recommend plan vs. on-the-fly mode, apply code fixes, resolve or reply, then commit"
     }
   ]
 }

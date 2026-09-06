@@ -505,191 +505,927 @@ def _gemini_tui(c: dict) -> list[str]:
     return argv + ["-i", c["prompt"]]
 
 
-# A starting point for the human's choice, not a substitute for it. Any list
-# baked into a script lags the providers by however long since it was edited, so
-# every entry carries the effort that actually suits that model and one line on
-# what it is like to argue with -- and `models` prints it next to whatever the
-# machine itself turns out to mention. `--force` accepts anything not here.
-CATALOG: dict[str, list[dict]] = {
-    "claude": [
-        {"id": "claude-opus-5", "effort": "high",
-         "note": "deepest reasoning; the strongest challenger, and the slowest"},
-        {"id": "claude-sonnet-5", "effort": "high", "default": True,
-         "note": "best all-round partner -- fast enough to argue in real time"},
-        {"id": "claude-haiku-4-5-20251001", "effort": "low",
-         "note": "quick and cheap; concedes too easily to be a good opponent"},
-    ],
-    "codex": [
-        {"id": "gpt-5-codex", "effort": "high", "default": True,
-         "note": "code-focused; the usual pick facing a Claude session"},
-        {"id": "gpt-5", "effort": "high",
-         "note": "general reasoning; better on design questions than on diffs"},
-    ],
-    "gemini": [
-        {"id": "gemini-2.5-pro", "effort": "high", "default": True,
-         "note": "strongest Gemini; a useful third voice in a deadlock"},
-        {"id": "gemini-2.5-flash", "effort": "low",
-         "note": "fast and cheap; thin on hard reasoning"},
-    ],
-}
+# --------------------------------------------------------------------------
+# what this machine actually has
+# --------------------------------------------------------------------------
+# Nothing below is a closed list of blessed CLIs, and nothing below is a
+# snapshot of anybody's model lineup. Both go stale the week they are written,
+# and the cost is paid by the user: a partner they cannot start, or a model
+# they are not offered because this file has not been edited since it shipped.
+#
+# So the sources of truth live outside this file:
+#
+#   * CLIs come from a scan of the directories this machine installs them into
+#     -- PATH plus the per-user bin dirs npm/bun/cargo/pipx/winget use. Naming
+#     a binary the scan never surfaced works too; the scan suggests, it does
+#     not gate.
+#   * Launch flags come from the CLI's own --help whenever there is no recipe
+#     for it, so an unknown CLI is drivable the first time it is named.
+#   * Model ids come from the CLI itself (a list command, its help, its own
+#     bundle) and from the user's config for it -- never from a table here.
+#   * The only claim this file still makes about a model is what its *name
+#     shape* implies: an "opus"/"pro"/"max" tier reasons deeper and slower than
+#     a "flash"/"mini"/"lite" one. That stays true for models not yet released,
+#     which is the whole reason it is phrased as a shape and not as an id.
+#
+# RECIPES holds hand-verified launch flags for the CLIs whose flags were
+# checked by hand. It is an accelerator, not a permission list: every code path
+# below falls back to probing when a name is not in it.
 
-PROVIDERS: dict[str, dict] = {
+RECIPES: dict[str, dict] = {
     "claude": {"bin": "claude", "tui": _claude_tui, "effort": "prompt",
                "efforts": set(EFFORT_HINT),
-               "models": [m["id"] for m in CATALOG["claude"]],
                "install": "npm install -g @anthropic-ai/claude-code",
                "login": "claude  (then /login)"},
     "codex": {"bin": "codex", "tui": _codex_tui, "effort": "flag",
-              # A real flag, so only the values the API accepts work here.
-              # "max" is ours, not OpenAI's -- it maps onto "high".
+              # A real API field, so only values the API accepts work here.
+              # "max" is this skill's own level -- it maps onto "high".
               "efforts": {"low", "medium", "high"},
-              "models": [m["id"] for m in CATALOG["codex"]],
               "install": "npm install -g @openai/codex",
               "login": "codex login"},
     "gemini": {"bin": "gemini", "tui": _gemini_tui, "effort": "prompt",
                "efforts": set(EFFORT_HINT),
-               "models": [m["id"] for m in CATALOG["gemini"]],
                "install": "npm install -g @google/gemini-cli",
                "login": "gemini  (then follow the browser prompt)"},
 }
 
-# Neither claude, codex nor gemini has a stable "list models" command, so
-# discovery reads what is on the machine rather than asking: the CLI's own help
-# text, and whatever the user has already configured for it.
-MODEL_RE: dict[str, re.Pattern] = {
-    "claude": re.compile(r"claude-[a-z0-9][a-z0-9.\-]{3,}", re.I),
-    "codex": re.compile(r"\bgpt-[0-9][a-z0-9.\-]*", re.I),
-    "gemini": re.compile(r"\bgemini-[0-9][a-z0-9.\-]*", re.I),
-}
-
-# Second segments that mean "tooling named after the provider", not a model.
-NON_MODEL_SEGMENTS = {"code", "desktop", "plugins", "statusline", "setup",
-                      "cli", "agent", "md", "config", "settings"}
-
-CONFIG_HINTS: dict[str, list[str]] = {
-    "claude": ["~/.claude/settings.json", "~/.claude.json"],
-    "codex": ["~/.codex/config.toml"],
-    "gemini": ["~/.gemini/settings.json"],
-}
+# Kept as an alias: older briefings and any external caller still say PROVIDERS.
+PROVIDERS = RECIPES
 
 
-def discover_models(provider: str, timeout: int = 20) -> list[str]:
-    """Model ids this machine mentions, whether or not the catalog knows them.
+# --------------------------------------------------------------------------
+# where CLIs get installed
 
-    A hint for the human to choose from, never an authority: an id found here
-    still fails `validate` without `--force`, because "the string appears in a
-    help page" is not evidence the model exists.
+def _user_bin_dirs() -> list[Path]:
+    r"""The per-user directories package managers drop CLI entry points into.
+
+    PATH alone is not enough. A CLI installed by a vendor installer often lands
+    somewhere PATH only picks up in a login shell -- codex under
+    %LOCALAPPDATA%\Programs\OpenAI\Codex\bin is a real example -- and an agent
+    inherits whatever environment the harness happened to have.
     """
-    pat, spec = MODEL_RE.get(provider), PROVIDERS.get(provider)
-    if not pat or not spec:
-        return []
-    blobs = []
-    if spec["bin"] and _has(spec["bin"]):
-        try:
-            r = subprocess.run([spec["bin"], "--help"], capture_output=True,
-                               text=True, encoding="utf-8", errors="replace",
-                               timeout=timeout)
-            blobs.append((r.stdout or "") + (r.stderr or ""))
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    for hint in CONFIG_HINTS.get(provider, []):
-        f = Path(hint).expanduser()
-        try:
-            if f.is_file() and f.stat().st_size < 2_000_000:
-                blobs.append(f.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            pass
-    found = set()
-    for b in blobs:
-        for m in pat.finditer(b):
-            hit = m.group(0).lower().strip(".,;:)\"'")
-            hit = re.sub(r"\.(cmd|sh|ps1|exe|json|md|ya?ml|toml)$", "", hit)
-            segs = hit.split("-")[1:]
-            # A model id carries a version somewhere. Without that rule the
-            # config files hand back every plugin and script that happens to
-            # start with the provider's name -- claude-code-setup, claude-desktop.
-            if not any(any(c.isdigit() for c in s) for s in segs):
-                continue
-            if segs and segs[0] in NON_MODEL_SEGMENTS:
-                continue
-            found.add(hit)
-    return sorted(found)
+    home = Path.home()
+    d = [home / ".local" / "bin", home / "bin", home / ".bun" / "bin",
+         home / ".cargo" / "bin", home / "go" / "bin", home / ".deno" / "bin",
+         home / ".npm-global" / "bin", home / ".volta" / "bin",
+         home / ".yarn" / "bin", home / ".pixi" / "bin"]
+    if os.name == "nt":
+        appdata, local = os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA")
+        if appdata:
+            d += [Path(appdata) / "npm", Path(appdata) / "Python" / "Scripts"]
+        if local:
+            lp = Path(local)
+            d += [lp / "Microsoft" / "WinGet" / "Links", lp / "pnpm",
+                  lp / "Yarn" / "bin"]
+            progs = lp / "Programs"
+            if progs.is_dir():
+                # Vendor installers bury the entry point a level or two down.
+                for pat in ("*/bin", "*/*/bin", "*/*"):
+                    try:
+                        d += [p for p in progs.glob(pat) if p.is_dir()]
+                    except OSError:
+                        pass
+    else:
+        d += [Path("/usr/local/bin"), Path("/opt/homebrew/bin"),
+              home / ".local" / "share" / "pnpm"]
+    return d
 
+
+def _exe_exts() -> tuple[str, ...]:
+    if os.name != "nt":
+        return ("",)
+    raw = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD;.PS1")
+    return tuple(e.lower() for e in raw.split(os.pathsep) if e)
+
+
+def search_dirs(skip_system: bool = True) -> list[Path]:
+    r"""Every directory worth looking in, deduplicated, user dirs first.
+
+    `skip_system` drops the operating system's own bin directories. Nobody
+    installs an agent CLI into C:\Windows\System32 or /usr/sbin, and scanning
+    them costs thousands of pointless probes -- plus a listing full of
+    gpg-agent and MBR2GPT, which is worse than useless when the output is
+    meant to be a short list of things to spawn a partner in.
+    """
+    sysish = ("\\windows\\", "system32", "syswow64", "/usr/bin", "/bin/",
+              "/sbin", "/usr/sbin", "\\program files")
+    out, seen = [], set()
+    cands = [str(p) for p in _user_bin_dirs()]
+    cands += (os.environ.get("PATH") or "").split(os.pathsep)
+    for raw in cands:
+        if not raw.strip():
+            continue
+        try:
+            p = Path(raw).expanduser()
+            key = str(p.resolve()).lower()
+        except OSError:
+            continue
+        if key in seen or not p.is_dir():
+            continue
+        if skip_system and any(s in key + os.sep for s in sysish):
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+# Name signals that make a binary worth surfacing in the *fast* scan. These are
+# accelerators, not a whitelist: `--deep` classifies by behaviour instead, and
+# naming any binary directly bypasses this regex entirely. Product names are in
+# here only because they are the cheapest possible hit; a CLI called something
+# nobody here predicted is still reachable by the other two routes.
+LIKELY_AGENT_RE = re.compile(
+    r"(?:^|[-_])(?:ai|llm|gpt|agent|agents|assistant|bot|chat|code|coder|"
+    r"copilot|cli|pair)(?:$|[-_])"
+    r"|(?:ai|gpt|llm|agent|assistant|coder|copilot|code)$"
+    r"|^(?:claude|codex|gemini|aider|cursor|goose|amp|crush|qwen|grok|deepseek|"
+    r"mistral|ollama|opencode|droid|cline|continue|kilo|windsurf|zed|openhands|"
+    r"plandex|mentat|smol)",
+    re.I)
+
+# Names that match the heuristic but are never an agent CLI.
+NOT_A_CLI = {"code", "code-insiders", "codesign", "clip", "clipboard",
+             "devenv", "devcon", "aiff", "chattr", "codepage"}
+
+
+def _stem(name: str) -> str:
+    low = name.lower()
+    for e in _exe_exts():
+        if e and low.endswith(e):
+            return low[: -len(e)]
+    return low
+
+
+def scan_clis(deep: bool = False, budget: float = 45.0) -> list[dict]:
+    """Agent CLIs present on this machine, found rather than assumed.
+
+    The name is only a prefilter; **behaviour decides**. Every candidate is
+    asked for its --help, and it is listed only if that help reads like an
+    agent CLI -- a model flag, a prompt, a session, a way to stop it asking
+    permission. Name alone was tried first and it was useless in both
+    directions: it let in gpg-agent and ssh-agent, and it would still have
+    missed any CLI whose name gives nothing away.
+
+    `deep` drops the name prefilter and probes every binary in those
+    directories instead, which is the version that finds the CLI nobody here
+    could have predicted the name of. It costs a subprocess per binary, so it
+    is opt-in and bounded by `budget`.
+    """
+    found: dict[str, dict] = {}
+    for name, spec in RECIPES.items():
+        path = find_binary(spec["bin"])
+        found[name] = {"name": name, "path": path, "installed": bool(path),
+                       "how": "recipe", "install": spec["install"]}
+    for name, ov in load_overrides().items():
+        binary = (shlex.split(ov.get("cmd", ""))[:1] or [name])[0]
+        path = find_binary(binary)
+        found[name] = {"name": name, "path": path, "installed": bool(path),
+                       "how": "your config", "install": ov.get("install", "")}
+
+    exts = _exe_exts()
+    seen: set[str] = set()
+    deadline = time.time() + budget
+    for d in search_dirs():
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            continue
+        for f in entries:
+            if time.time() > deadline:
+                break
+            if exts != ("",) and not f.name.lower().endswith(exts):
+                continue
+            stem = _stem(f.name)
+            if stem in found or stem in NOT_A_CLI or stem in seen:
+                continue
+            if "." in stem or len(stem) < 2:
+                continue
+            if not deep and not LIKELY_AGENT_RE.search(stem):
+                continue
+            try:
+                if not f.is_file():
+                    continue
+            except OSError:
+                continue
+            seen.add(stem)
+            if probe_cli(stem, str(f), timeout=8).get("agentic"):
+                found[stem] = {"name": stem, "path": str(f), "installed": True,
+                               "how": "found here", "install": ""}
+    try:
+        (cache_dir() / "clis.json").write_text(json.dumps(
+            {k: v["path"] for k, v in found.items() if v["path"]}),
+            encoding="utf-8")
+    except OSError:
+        pass
+    return sorted(found.values(), key=lambda r: (not r["installed"], r["name"]))
+
+
+# --------------------------------------------------------------------------
+# reading a CLI's own help
+
+def find_binary(name: str) -> str | None:
+    """Resolve a CLI name to a path, PATH or not.
+
+    PATH is not the boundary of what is installed. Codex ships into
+    %LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin, which a login shell picks up
+    and an agent's inherited environment may not -- and the scan looks there
+    regardless. Anything the scan resolved is remembered, so naming it later
+    works even though `shutil.which` cannot see it.
+    """
+    if os.sep in name or "/" in name:
+        return name if Path(name).exists() else None
+    hit = shutil.which(name)
+    if hit:
+        return hit
+    try:
+        seen = json.loads((cache_dir() / "clis.json").read_text(encoding="utf-8"))
+        path = seen.get(name)
+        return path if path and Path(path).exists() else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def cache_dir() -> Path:
+    """Probe results live beside the session when there is one, in the home
+    directory otherwise -- `providers` and `models` are useful outside a repo."""
+    try:
+        root = repo_root()
+        sd = state_dir(root)
+        if sd.parent.exists():
+            d = sd / "cache"
+            d.mkdir(parents=True, exist_ok=True)
+            # `providers` and `models` are useful before any session exists, and
+            # they create this directory -- so exclude .partner/ here too rather
+            # than only in `init`. Otherwise merely asking what CLIs are around
+            # leaves an untracked directory in the user's `git status`.
+            git_exclude(root)
+            return d
+    except OSError:
+        pass
+    d = Path.home() / ".partner-cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _run(argv: list[str], timeout: int) -> tuple[int, str]:
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout,
+                           stdin=subprocess.DEVNULL)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return 1, ""
+
+
+# Flags a CLI offers for "stop asking me", grouped by how far they go and
+# matched against the CLI's own help -- so an unknown CLI still gets launched
+# without prompting, the thing that otherwise silently stalls a debate.
+AUTO_FLAGS: dict[str, list[str]] = {
+    "full": ["--dangerously-bypass-approvals-and-sandbox",
+             "--dangerously-skip-permissions", "--yolo", "--allow-all",
+             "--full-auto", "--no-sandbox", "--auto-approve-all"],
+    "edits": ["--auto-edit", "--auto-approve", "--accept-edits",
+              "--no-confirm", "--non-interactive", "--yes"],
+}
+# Valued flags: one flag, a different value per level.
+AUTO_VALUED: list[tuple[str, str, str]] = [
+    ("--permission-mode", "acceptEdits", "bypassPermissions"),
+    ("--approval-mode", "auto_edit", "yolo"),
+]
+# Flags that carry the starting prompt. `-p`/`--print` are deliberately absent:
+# on several CLIs they mean "run headless and exit", which would open a tab that
+# finishes before anybody could type in it.
+PROMPT_FLAGS = ["--prompt", "--message", "--task", "--input", "-i"]
+
+
+def _usage_block(help_text: str) -> str:
+    """The synopsis: the `usage:` line and its continuations, nothing after.
+
+    A CLI's usage line says what its arguments *are*; the rest of a help page
+    says what it can be asked to do. Only the first answers "can this be handed
+    a task in words", which is the question that separates an agent from a tool
+    an agent uses.
+    """
+    lines = help_text.splitlines()
+    for i, ln in enumerate(lines):
+        if re.match(r"\s*usage\s*:", ln, re.I):
+            block = [ln]
+            for nxt in lines[i + 1: i + 6]:
+                if not nxt.strip():
+                    break
+                block.append(nxt)
+            return NL.join(block)
+    return help_text[:400]
+
+
+def probe_cli(name: str, path: str | None = None, timeout: int = 20,
+              refresh: bool = False) -> dict:
+    """Derive how to drive a CLI from its own --help.
+
+    Cached against the binary's path, size and mtime, so upgrading the CLI
+    invalidates the entry by itself instead of waiting out a TTL.
+    """
+    binary = path or find_binary(name)
+    out: dict = {"name": name, "bin": binary, "found": bool(binary),
+                 "model_flag": None, "effort_flag": None, "efforts": [],
+                 "auto": {}, "prompt_flag": None, "list_cmd": None,
+                 "version": None, "agentic": False, "help": ""}
+    if not binary:
+        return out
+    try:
+        st = Path(binary).stat()
+        key = f"{binary}|{st.st_size}|{int(st.st_mtime)}"
+    except OSError:
+        key = binary
+    cf = cache_dir() / ("probe-" + re.sub(r"[^a-z0-9]+", "_", name.lower()) + ".json")
+    if not refresh and cf.exists():
+        try:
+            hit = json.loads(cf.read_text(encoding="utf-8"))
+            if hit.get("key") == key:
+                return hit["probe"]
+        except (OSError, ValueError, KeyError):
+            pass
+
+    rc, help_text = _run([binary, "--help"], timeout)
+    if rc != 0 or len(help_text) < 40:
+        for alt in (["help"], ["-h"]):
+            rc2, alt_text = _run([binary, *alt], timeout)
+            if len(alt_text) > len(help_text):
+                help_text = alt_text
+            if rc2 == 0 and len(help_text) > 40:
+                break
+    out["help"] = help_text[:20000]
+    low = help_text.lower()
+
+    m = re.search(r"(--model(?:-name|-id)?)\b", help_text)
+    out["model_flag"] = m.group(1) if m else ("-m" if re.search(
+        r"(?<![\w-])-m\b[ ,=]*[<\[]?\s*model", low) else None)
+
+    e = re.search(r"(--(?:model-)?(?:reasoning-effort|reasoning|effort|"
+                  r"thinking(?:-budget|-level|-mode)?))\b", help_text)
+    if e:
+        out["effort_flag"] = e.group(1)
+        tail = help_text[e.end(): e.end() + 240]
+        c = re.search(r"[\[{(]\s*([a-z]+(?:\s*[|,/]\s*[a-z]+){1,5})\s*[\]})]",
+                      tail, re.I)
+        if c:
+            out["efforts"] = [x.strip().lower()
+                              for x in re.split(r"[|,/]", c.group(1)) if x.strip()]
+
+    for level, flags in AUTO_FLAGS.items():
+        for f in flags:
+            if f in help_text:
+                out["auto"][level] = [f]
+                break
+    for flag, v_edits, v_full in AUTO_VALUED:
+        if flag in help_text:
+            if v_edits in help_text:
+                out["auto"].setdefault("edits", [flag, v_edits])
+            if v_full in help_text:
+                out["auto"].setdefault("full", [flag, v_full])
+    # Deliberately no fallback from "edits" to the "full" flag. A CLI that only
+    # advertises a sandbox-bypass flag gets nothing for `--auto edits`, and the
+    # partner stops to ask in its tab -- annoying, and visible. Substituting
+    # the bypass flag would silently turn a request to accept edits into a
+    # request to remove the sandbox, on a CLI nobody wrote a recipe for.
+
+    # Can this CLI be handed a task in words? A positional the usage line calls
+    # a prompt (claude: `[prompt]`, codex: `[PROMPT]`) is the common shape; a
+    # flag that carries one is the other. Nothing else can start a partner:
+    # everything a partner does begins with being told, in a sentence, what the
+    # argument is about.
+    # Only the usage line counts. Searching the whole help finds `chat
+    # <message>` buried among fifty other subcommands and concludes a browser
+    # driver is an agent; in the usage line, a prompt positional means the
+    # prompt is what the CLI is *for* -- `claude [options] [prompt]`,
+    # `codex [OPTIONS] [PROMPT]`.
+    positional = bool(re.search(
+        r"[\[<](?:prompt|task|message|instruction|query|request)[\]>.]",
+        _usage_block(low)))
+    if not positional:
+        for f in PROMPT_FLAGS:
+            if re.search(re.escape(f) + r"\b[ ,=]*[<\[]", help_text):
+                out["prompt_flag"] = f
+                break
+    out["takes_prompt"] = positional or bool(out["prompt_flag"])
+
+    # Only a `models` line inside the CLI's own command list counts.
+    # Matched anywhere in the help, the word "model(s)" in a flag
+    # description is enough to invent a subcommand that does not exist --
+    # and running it launches the agent, which then sits waiting for input
+    # until the timeout expires.
+    cmds = re.split(r"(?im)^\s*(?:sub)?commands\s*:", help_text)
+    if len(cmds) > 1 and re.search(r"(?m)^\s+models?", cmds[-1]):
+        out["list_cmd"] = [binary, "models", "list"]
+    elif "--list-models" in help_text:
+        out["list_cmd"] = [binary, "--list-models"]
+
+    # Does this behave like an agent CLI at all? This is what the scan trusts
+    # instead of the binary's name. An LLM word plus two of the operational
+    # signals: one signal alone is met by half of /usr/bin (`ssh-agent` says
+    # "agent", `gpg` says "prompt"), and all five would demand more uniformity
+    # than these CLIs have.
+    # "model" specifically, not any AI-adjacent word. Tools built *for* agents
+    # rather than *as* one -- a browser driver, an MCP server -- talk about
+    # prompts and tokens and agents all day and have no model to choose.
+    llm = bool(out["model_flag"]) or "model" in low
+    signals = sum(bool(s) for s in (
+        out["model_flag"],
+        "agent" in low or "chat" in low or "assistant" in low or "coding" in low,
+        "session" in low or "conversation" in low or "resume" in low,
+        bool(out["auto"]) or "approv" in low or "permission" in low,
+        "mcp" in low or "tool" in low))
+    # takes_prompt is the load-bearing one, and it is why a browser driver
+    # built *for* agents does not qualify: it has --model, sessions and an
+    # approve command, and every one of those signals fires -- but it is driven
+    # by `open <url>` and `click <sel>`, so there is no way to tell it what the
+    # argument is about. A partner that cannot be told is not a partner.
+    out["agentic"] = bool(llm and out["takes_prompt"] and signals >= 3
+                          and len(help_text) > 200)
+    if out["agentic"]:
+        # Only worth a subprocess for something being offered as a partner.
+        _, ver = _run([binary, "--version"], timeout)
+        out["version"] = (ver.strip().splitlines() or [""])[0][:80] or None
+    try:
+        cf.write_text(json.dumps({"key": key, "probe": out}), encoding="utf-8")
+    except OSError:
+        pass
+    return out
+
+
+# --------------------------------------------------------------------------
+# CLIs the user described, kept between sessions
+
+OVERRIDE_FILES = [
+    Path.home() / ".claude" / "partner-providers.json",
+    Path.home() / ".partner" / "providers.json",
+]
+
+
+def load_overrides() -> dict:
+    """CLIs the user described once and wants to keep.
+
+    Optional in every sense -- `--provider custom --cmd '...'` still works ad
+    hoc and needs no file at all. This exists so a CLI used often does not have
+    to be retyped, and so a repo can pin one for everybody working in it.
+    Repo-level entries win over home-level ones.
+
+    Each entry: {"cmd": "<template containing {prompt}>", "efforts": [...],
+                 "install": "...", "note": "..."}
+    """
+    files = list(OVERRIDE_FILES)
+    try:
+        files.append(state_dir() / "providers.json")
+    except OSError:
+        pass
+    out: dict = {}
+    for f in files:
+        try:
+            if f.is_file():
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, dict) and v.get("cmd"):
+                            out[k] = {**v, "source": str(f)}
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+# --------------------------------------------------------------------------
+# models
+
+# One shape, not one list per vendor. A model id is a lowercase family token
+# followed by segments, at least one of which carries a version number --
+# gpt-5.1, claude-opus-5, gemini-3-pro, llama3:8b, deepseek-v3, qwen2.5-coder.
+# Anchoring on the shape rather than on a vendor prefix is what lets a model
+# released after this file was written be found at all.
+MODEL_ID_RE = re.compile(
+    r"(?<![\w/.-])[a-z][a-z0-9]{1,19}(?:[-.][a-z0-9]+){1,5}(?::[a-z0-9.\-]+)?",
+    re.I)
+
+# Segments that mean tooling, packaging or plumbing named after a provider --
+# claude-code, gemini-cli, gpt-4-config -- rather than a model.
+NON_MODEL_SEGMENTS = {
+    "code", "desktop", "plugins", "statusline", "setup", "cli", "agent", "md",
+    "config", "settings", "json", "yaml", "yml", "toml", "exe", "dll", "cmd",
+    "sh", "ps1", "node", "npm", "npx", "win32", "x64", "x86", "arm64", "utf",
+    "sha256", "sha1", "md5", "http", "https", "www", "com", "org", "io",
+    "log", "tmp", "cache", "bin", "lib", "src", "dist", "build", "py", "js",
+    "ts", "css", "html", "svg", "png", "ttf", "woff", "woff2", "map", "lock",
+}
+
+
+# Prefixes and shapes that mean "this is a secret", not a model. Credential
+# files are skipped outright (see _config_paths), but a token can turn up in a
+# log line or a config comment too, and everything found here is printed into a
+# transcript that every partner reads.
+SECRET_RE = re.compile(r"^(sk|pk|rk|ghp|gho|ghs|github_pat|xox[abposr]|"
+                       r"api|key|token|bearer|secret|aki)[-_]", re.I)
+
+
+def _looks_like_model(raw: str) -> str | None:
+    mid = raw.lower().strip(".,;:)]}\"'`")
+    mid = re.sub(r"\.(cmd|sh|ps1|exe|json|md|ya?ml|toml|js|py|txt|lock)$", "", mid)
+    if not 5 <= len(mid) <= 60:
+        return None
+    if not re.fullmatch(r"[a-z0-9._:-]+", mid) or SECRET_RE.match(mid):
+        return None
+    segs = re.split(r"[-.:]", mid)
+    # No vendor names a model with a 20-character segment; every secret does.
+    if any(len(s) > 20 for s in segs):
+        return None
+    if len(segs) < 2 or not segs[0] or not segs[0][0].isalpha():
+        return None
+    if re.fullmatch(r"v?\d[\d.]*", segs[0]):
+        return None
+    if any(s in NON_MODEL_SEGMENTS for s in segs):
+        return None
+    # Session ids, cache keys and UUIDs have exactly the shape of a model id --
+    # a word, hyphens, digits -- and config directories are full of them. The
+    # tell is a long run of pure hex, which no vendor has yet used to name
+    # something a human is expected to type.
+    if any(len(s) >= 8 and all(c in "0123456789abcdef" for c in s) for s in segs):
+        return None
+    # A version number somewhere past the family token is the load-bearing
+    # rule: without it every hyphenated word in a help page is a "model".
+    if not any(any(ch.isdigit() for ch in s) for s in segs[1:]):
+        return None
+    return mid
+
+
+def _ids_in(text: str) -> set[str]:
+    out = set()
+    for m in MODEL_ID_RE.finditer(text):
+        mid = _looks_like_model(m.group(0))
+        if mid:
+            out.add(mid)
+    return out
+
+
+def _config_paths(name: str) -> list[Path]:
+    """Where a CLI called <name> conventionally keeps its settings."""
+    home = Path.home()
+    pats = ["config.toml", "config.json", "config.yaml", "config.yml",
+            "settings.json", "config", "*.json", "*.toml"]
+    out: list[Path] = []
+    for base in (home / f".{name}", home / ".config" / name):
+        if base.is_dir():
+            for pat in pats:
+                try:
+                    out += [p for p in base.glob(pat) if p.is_file()]
+                except OSError:
+                    pass
+    # Never open a credential store. Whatever is found here is printed into a
+    # shared transcript, so a file whose whole purpose is holding a secret is
+    # not somewhere to go looking for model names.
+    out = [f for f in out if not re.search(
+        r"credential|secret|token|auth|\bkeys?\b|password|cookie", f.name, re.I)]
+    for f in (home / f".{name}.json", home / f".{name}rc",
+              home / f".{name}" / "settings.local.json"):
+        if f.is_file():
+            out.append(f)
+    seen, uniq = set(), []
+    for p in out:
+        k = str(p).lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(p)
+    return uniq[:12]
+
+
+def _model_keyed_values(text: str) -> set[str]:
+    """Values sitting under a key whose name contains "model".
+
+    The strongest signal available offline: the user has already told the CLI
+    which model to use, so whatever is written there certainly exists.
+    """
+    out = set()
+    try:
+        data = json.loads(text)
+
+        def walk(node, key=""):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    walk(v, str(k))
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v, key)
+            elif isinstance(node, str) and "model" in key.lower():
+                mid = _looks_like_model(node)
+                if mid:
+                    out.add(mid)
+        walk(data)
+        return out
+    except ValueError:
+        pass
+    for m in re.finditer(r"(?im)^[ \t]*[\"']?([\w.\-]*model[\w.\-]*)[\"']?"
+                         r"\s*[:=]\s*[\"']?([^\"'\s,#\]]+)", text):
+        mid = _looks_like_model(m.group(2))
+        if mid:
+            out.add(mid)
+    return out
+
+
+def _bundle_ids(binary: str, cap_mb: int = 48, deadline: float = 0.0) -> set[str]:
+    """Model ids embedded in the CLI's own program files.
+
+    Where a CLI ships its model list compiled in -- most of them do -- this is
+    the closest thing available to asking it. Read in chunks against a byte and
+    time budget, because these bundles run to hundreds of megabytes.
+    """
+    try:
+        real = Path(binary).resolve()
+    except OSError:
+        return set()
+    roots = [real.parent]
+    parts = real.parts
+    if "node_modules" in parts:
+        i = len(parts) - 1 - parts[::-1].index("node_modules")
+        roots.append(Path(*parts[: i + 2]))
+    # Program text only -- never the compiled executable. Scanned as bytes, a
+    # native binary yields hundreds of strings with the shape of a model id and
+    # the meaning of none ("a8q.1", "about-seh1"), which buries the handful of
+    # real ones. A CLI shipped as JavaScript is where this actually pays off.
+    files: list[Path] = []
+    for r in roots:
+        for pat in ("*.js", "*.mjs", "*.cjs", "*.json"):
+            try:
+                files += [f for f in r.glob(pat) if f.is_file()]
+            except OSError:
+                pass
+    budget = cap_mb * 1024 * 1024
+    out: set[str] = set()
+    for f in files[:16]:
+        if budget <= 0 or (deadline and time.time() > deadline):
+            break
+        try:
+            with f.open("rb") as fh:
+                tail = ""
+                while budget > 0:
+                    chunk = fh.read(4 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    budget -= len(chunk)
+                    text = tail + chunk.decode("utf-8", "replace")
+                    out |= _ids_in(text)
+                    tail = text[-200:]
+                    if deadline and time.time() > deadline:
+                        break
+        except OSError:
+            continue
+    return out
+
+
+def discover_models(provider: str, binary: str | None = None,
+                    deep: bool = False, budget: float = 25.0) -> list[dict]:
+    """Model ids this machine can actually name, with where each came from.
+
+    Ordered newest-looking first. The source matters: a `models` subcommand or
+    a key the user configured is evidence; a string in a help page or a bundle
+    is a lead. None of it is checked against the vendor -- that is what the web
+    is for, and the skill goes there when this comes back thin.
+    """
+    if binary is None:
+        spec = resolve_provider(provider)
+        binary = spec.get("bin") and find_binary(spec["bin"])
+    deadline = time.time() + budget
+    # id -> (confidence rank, where it came from). Rank 0 is the CLI or the
+    # user naming a model outright; rank 1 is a string that merely has the
+    # shape of one, found in a help page or a bundle. Both are worth showing
+    # and they are not worth showing as if they were the same thing.
+    hits: dict[str, tuple[int, str]] = {}
+
+    def add(ids, source: str, rank: int = 1) -> None:
+        for i in ids:
+            if rank < hits.get(i, (9, ""))[0]:
+                hits[i] = (rank, source)
+
+    if binary:
+        pr = probe_cli(provider, binary)
+        if pr.get("list_cmd"):
+            # Short leash. "models" in a help page is not proof of a `models`
+            # subcommand: on a CLI that has no such command, this launches the
+            # agent itself, which then sits waiting for input until the timeout.
+            rc, txt = _run(pr["list_cmd"], 6)
+            if rc == 0:
+                add(_ids_in(txt), "the CLI's own model list", rank=0)
+        add(_ids_in(pr.get("help") or ""), "the CLI's help")
+
+    # Config files split into two treatments by size. Walking JSON for keys
+    # named "model" is cheap and precise, so every file gets it; the broad
+    # regex over the whole text is neither, so it is spent only on the small
+    # files and within a byte budget. A 4 MB .claude.json scanned both ways
+    # took twenty seconds and returned session ids.
+    loose_budget = 4_000_000
+    for f in _config_paths(provider):
+        if time.time() > deadline:
+            break
+        try:
+            size = f.stat().st_size
+            if size > 8_000_000:
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        add(_model_keyed_values(text), f"a model setting in your {f.name}", rank=0)
+        if size <= 512_000 and loose_budget > 0:
+            loose_budget -= size
+            add(_ids_in(text), f"text in your {f.name}")
+
+    # The bundle scan is the expensive one, so it runs when the cheap sources
+    # came back thin, or when it was asked for.
+    # Only scan a bundle that belongs to this provider. Under a name from the
+    # user's providers.json the binary is whatever their template wraps, and
+    # reporting that CLI's ids as this provider's would be a plain lie.
+    own = binary and Path(binary).stem.lower() == provider.lower()
+    if own and (deep or len(hits) < 3) and time.time() < deadline:
+        add(_bundle_ids(binary, deadline=deadline), "the CLI's own bundle")
+
+    return [{"id": mid, "source": src, "confidence":
+             "named" if rank == 0 else "mentioned", **tier_of(mid)}
+            for mid, (rank, src) in sorted(
+                hits.items(), key=lambda kv: (kv[1][0], model_rank(kv[0])))]
+
+
+# What a model's *name* implies about arguing with it. Shapes, not ids, so a
+# model released next month is described correctly the first time it appears.
+# Advisory: it reports what each vendor's naming convention has meant so far.
+TIER_RULES: list[tuple[re.Pattern, str, str, str]] = [
+    (re.compile(r"(?:^|[-_.])(opus|ultra|max|large|xl|heavy)(?:$|[-_.\d])", re.I),
+     "deep", "high",
+     "top of its family: deepest reasoning, strongest challenger, slowest"),
+    (re.compile(r"(?:^|[-_.])(haiku|flash|mini|lite|nano|small|tiny|instant|"
+                r"fast|air|\d+b)(?:$|[-_.\d])", re.I),
+     "fast", "low",
+     "fast and cheap; concedes too easily to be much of an opponent"),
+    (re.compile(r"(?:^|[-_.])(codex|coder|code)(?:$|[-_.\d])", re.I),
+     "code", "high",
+     "code-tuned: sharper on diffs than on open design questions"),
+    (re.compile(r"(?:^|[-_.])(think|thinking|reason|reasoning|r1|o[1-9])(?:$|[-_.\d])",
+                re.I),
+     "reasoning", "high",
+     "reasoning-tuned: slow, and hard to talk out of a position"),
+    (re.compile(r"(?:^|[-_.])(sonnet|pro|medium|standard|turbo|plus)(?:$|[-_.\d])",
+                re.I),
+     "balanced", "high",
+     "the balanced tier: fast enough to argue with in real time"),
+]
+
+
+def tier_of(mid: str) -> dict:
+    for rx, tier, effort, note in TIER_RULES:
+        if rx.search(mid):
+            return {"tier": tier, "effort": effort, "note": note}
+    return {"tier": "general", "effort": "high",
+            "note": "no tier signal in the name -- try it and see"}
+
+
+def model_rank(mid: str) -> tuple:
+    """Newest-looking first: version numbers in order, then any date stamp.
+
+    In order, not the largest -- claude-opus-4-7 has a 7 in it and is older
+    than claude-opus-5. The leading number is the generation; the rest are
+    point releases within it.
+    """
+    nums = [-float(n) for n in
+            re.findall(r"(?<![\d.])(\d+(?:\.\d+)?)(?![\d.])", mid) if len(n) < 5]
+    date = max([int(d) for d in re.findall(r"\b(20\d{6})\b", mid)] or [0])
+    return (tuple(nums), -date, mid)
+
+
+# --------------------------------------------------------------------------
+# validation
 
 def cli_runs(binary: str) -> bool:
     """Does the binary actually start? Catches broken or half-finished installs."""
-    try:
-        r = subprocess.run([binary, "--version"], capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", timeout=30)
-        return r.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    rc, _ = _run([find_binary(binary) or binary, "--version"], 30)
+    return rc == 0
+
+
+def resolve_provider(name: str, cmd: str | None = None) -> dict:
+    """Everything needed to drive one CLI, from whichever source knows it.
+
+    Recipe, then the user's own config, then the CLI's own help. That last
+    fallback is why naming a CLI nobody here has heard of still produces a
+    working tab instead of an error.
+    """
+    if name == "custom":
+        return {"kind": "custom", "bin": (shlex.split(cmd or "")[:1] or [""])[0],
+                "efforts": set(EFFORT_HINT), "effort": "template",
+                "install": "", "cmd": cmd}
+    ov = load_overrides().get(name)
+    if ov:
+        return {"kind": "config", "bin": (shlex.split(ov["cmd"])[:1] or [name])[0],
+                "efforts": set(ov.get("efforts") or EFFORT_HINT),
+                "effort": "template", "install": ov.get("install", ""),
+                "cmd": ov["cmd"], "note": ov.get("note", ""),
+                "source": ov.get("source", "")}
+    if name in RECIPES:
+        return {"kind": "recipe", **RECIPES[name]}
+    pr = probe_cli(name)
+    return {"kind": "probed", "bin": pr["bin"] or name, "probe": pr,
+            "efforts": set(pr["efforts"]) if pr["efforts"] else set(EFFORT_HINT),
+            "effort": "flag" if pr["effort_flag"] else "prompt",
+            "install": "", "found": pr["found"]}
 
 
 def validate(provider: str, model: str | None, effort: str | None,
-             cmd: str | None, force: bool = False) -> list[str]:
-    """Check a partner's configuration, returning problems with their fixes.
+             cmd: str | None, force: bool = False) -> dict:
+    """Check a partner's configuration before a tab is opened.
 
-    Failing here costs a second; failing at launch costs a terminal tab that
-    flashes an error and disappears, which is much harder to diagnose. Each
-    problem carries the command that resolves it rather than only the fact.
+    Two severities, and the split is the point. A **problem** is something no
+    amount of insisting fixes -- a CLI that is not installed, an effort value
+    the API will reject -- and it stops the spawn. A **caution** is this script
+    not recognising something, which is not evidence of anything: model names
+    move faster than any check here, so an unrecognised model is said out loud
+    and then used. Refusing until --force meant a model released last week
+    needed a flag to try.
     """
-    problems = []
-    if provider == "custom":
-        if not cmd:
-            problems.append("--provider custom needs --cmd '<template containing {prompt}>'")
-        else:
-            binary = shlex.split(cmd)[0] if shlex.split(cmd) else ""
-            if binary and not _has(binary):
-                problems.append(
-                    f"'{binary}' is not on PATH. Install it, or correct the --cmd template.")
-        return problems
+    problems: list[str] = []
+    cautions: list[str] = []
 
-    spec = PROVIDERS.get(provider)
-    if not spec:
-        problems.append(f"unknown provider '{provider}'. "
-                        f"Known: {', '.join(PROVIDERS)}, custom. "
-                        f"For anything else use: --provider custom --cmd '...'")
-        return problems
+    if provider == "custom" and not cmd:
+        return {"problems": ["--provider custom needs --cmd "
+                             "'<template containing {prompt}>'"],
+                "cautions": cautions}
 
-    binary = spec["bin"]
-    if not _has(binary):
-        problems.append(f"'{binary}' is not installed or not on PATH. "
-                        f"Install it with:  {spec['install']}")
+    spec = resolve_provider(provider, cmd)
+    binary = spec.get("bin") or ""
+    if not binary:
+        problems.append(f"no binary to run for '{provider}'. "
+                        f"Give one with --cmd '<template>'.")
+    elif not find_binary(binary):
+        fix = (f"Install it with:  {spec['install']}" if spec.get("install")
+               else "Install it, or point --cmd at the right binary.")
+        near = [c["name"] for c in scan_clis() if c["installed"]][:8]
+        problems.append(f"'{binary}' is not installed or not on PATH. {fix}"
+                        + (f"{NL}    Installed here: {', '.join(near)}" if near else ""))
     elif not cli_runs(binary):
-        problems.append(f"'{binary}' is on PATH but `{binary} --version` failed. "
-                        f"The install looks broken -- try:  {spec['install']}")
+        cautions.append(f"`{binary} --version` did not exit cleanly. It may still "
+                        f"work, but a broken install shows up as a tab that "
+                        f"opens and closes.")
 
-    if effort and effort not in spec["efforts"]:
-        valid = ", ".join(sorted(spec["efforts"]))
-        extra = ""
-        if spec["effort"] == "flag" and effort == "max":
-            extra = " ('max' is this skill's own level; use 'high' for a real flag.)"
-        problems.append(f"effort '{effort}' is not supported by {provider}. "
-                        f"Use one of: {valid}.{extra}")
+    if effort:
+        if effort not in spec["efforts"]:
+            valid = ", ".join(sorted(spec["efforts"]))
+            extra = ""
+            if spec.get("effort") == "flag" and effort == "max":
+                extra = " ('max' is this skill's own level; 'high' is the real flag.)"
+            problems.append(f"effort '{effort}' is not accepted by {provider}. "
+                            f"Use one of: {valid}.{extra}")
+        elif spec.get("effort") == "prompt":
+            cautions.append(f"{provider} exposes no reasoning-effort flag, so "
+                            f"--effort {effort} goes into the briefing as an "
+                            f"instruction rather than a setting.")
 
-    if model and model not in spec["models"] and not force:
-        problems.append(
-            f"model '{model}' is not in the known list for {provider}: "
-            f"{', '.join(spec['models'])}. If it is a new or aliased model the "
-            f"list has not caught up with, re-run with --force to use it anyway.")
-    return problems
+    if model and not force and binary and find_binary(binary):
+        known = {m["id"] for m in discover_models(provider, find_binary(binary),
+                                                  budget=12)}
+        if known and model not in known:
+            sample = ", ".join(sorted(known)[:6])
+            cautions.append(
+                f"'{model}' is not among the ids this machine names for "
+                f"{provider} ({sample}...). Not proof it is wrong -- a new model "
+                f"is mentioned nowhere locally until it is used once -- but "
+                f"worth checking the spelling.")
+        elif not known:
+            cautions.append(f"nothing on this machine names a {provider} model, "
+                            f"so '{model}' could not be cross-checked.")
+
+    if spec.get("kind") == "probed" and binary:
+        pr = spec.get("probe", {})
+        got = [pr[k] for k in ("model_flag", "effort_flag") if pr.get(k)]
+        auto = "/".join(pr.get("auto", {}))
+        derived = ", ".join(got) if got else "no model or effort flag found"
+        if auto:
+            derived += "; auto: " + auto
+        cautions.append(
+            f"no hand-verified recipe for '{provider}': its flags were read from "
+            f"`{binary} --help` ({derived}). If the tab misbehaves, pass the "
+            f"exact command with --cmd instead.")
+    return {"problems": problems, "cautions": cautions}
 
 
 def cmd_check(args) -> int:
-    problems = validate(args.provider, args.model, args.effort, args.cmd, args.force)
-    if not problems:
-        bits = [args.provider]
-        if args.model:
-            bits.append(args.model)
-        if args.effort:
-            bits.append(f"effort={args.effort}")
-        emit(args, {"ok": True, "problems": []}, "ok: " + " / ".join(bits))
-        return 0
-    emit(args, {"ok": False, "problems": problems},
-         "cannot start this partner:" + NL
-         + NL.join(f"  - {p}" for p in problems))
-    return 1
+    v = validate(args.provider, args.model, args.effort, args.cmd, args.force)
+    problems, cautions = v["problems"], v["cautions"]
+    bits = [args.provider]
+    if args.model:
+        bits.append(args.model)
+    if args.effort:
+        bits.append(f"effort={args.effort}")
+    head = ("cannot start this partner:" if problems
+            else "ok: " + " / ".join(bits))
+    lines = [head]
+    lines += [f"  - {p}" for p in problems]
+    if cautions:
+        # Printed on success too. These are the things worth knowing before the
+        # tab opens, not reasons to stop.
+        lines.append("  worth knowing:")
+        lines += [f"  - {c}" for c in cautions]
+    emit(args, {"ok": not problems, **v}, NL.join(lines))
+    return 1 if problems else 0
 
 
 def _custom_tui(template: str, c: dict) -> list[str]:
@@ -713,19 +1449,46 @@ def _custom_tui(template: str, c: dict) -> list[str]:
     return out
 
 
+def _probed_tui(pr: dict, c: dict) -> list[str]:
+    """Drive a CLI nobody wrote a recipe for, from what its --help admitted to.
+
+    Conservative on purpose: a flag that was not found is a flag that is not
+    passed. A partner launched with no model flag runs on the CLI's own default
+    model, which is a working tab; a partner launched with a guessed flag is a
+    tab that prints a usage error and closes.
+    """
+    argv = [pr["bin"] or pr["name"]]
+    if c["model"] and pr.get("model_flag"):
+        argv += [pr["model_flag"], c["model"]]
+    if c["effort"] and pr.get("effort_flag"):
+        argv += [pr["effort_flag"], c["effort"]]
+    argv += pr.get("auto", {}).get(c["auto"], [])
+    if pr.get("prompt_flag"):
+        argv += [pr["prompt_flag"], c["prompt"]]
+        return argv
+    return argv + [c["prompt"]]
+
+
 def build_tui(p: dict, prompt: str) -> list[str]:
     c = {"prompt": prompt, "model": p.get("model") or "",
          "effort": p.get("effort") or "", "auto": p.get("auto") or "edits"}
-    if p["provider"] == "custom":
+    prov = p["provider"]
+    if prov == "custom":
         return _custom_tui(p.get("cmd") or "", c)
-    spec = PROVIDERS.get(p["provider"])
-    if not spec:
-        raise SystemExit(f"unknown provider {p['provider']!r}")
-    return spec["tui"](c)
+    spec = resolve_provider(prov, p.get("cmd"))
+    if spec["kind"] == "recipe":
+        return spec["tui"](c)
+    if spec["kind"] == "config":
+        # A CLI the user described in their own providers.json: same template
+        # language as --cmd, so there is one substitution path, not two.
+        return _custom_tui(spec["cmd"], c)
+    if spec.get("found"):
+        return _probed_tui(spec["probe"], c)
+    raise SystemExit(f"{prov!r} is not installed and has no --cmd template")
 
 
 def provider_spec(prov: str) -> dict:
-    return PROVIDERS.get(prov, {"effort": "prompt", "bin": None, "models": []})
+    return resolve_provider(prov)
 
 
 # --------------------------------------------------------------------------
@@ -1161,11 +1924,19 @@ def cmd_spawn(args) -> int:
     # Validate before anything is written or a tab is opened. A bad flag caught
     # here is one message; caught at launch it is a tab that flashes an error
     # and vanishes.
-    problems = validate(args.provider, args.model, args.effort, args.cmd, args.force)
-    if problems:
-        emit(args, {"error": "invalid", "problems": problems},
-             f"cannot start {pid}:" + NL + NL.join(f"  - {p}" for p in problems))
+    v = validate(args.provider, args.model, args.effort, args.cmd, args.force)
+    if v["problems"]:
+        emit(args, {"error": "invalid", **v},
+             f"cannot start {pid}:" + NL
+             + NL.join(f"  - {p}" for p in v["problems"]))
         return 1
+    if v["cautions"] and not getattr(args, "quiet", False):
+        # Said, not enforced. Each one is this script failing to recognise
+        # something rather than knowing it is wrong -- which is exactly the
+        # kind of thing to put in front of the user instead of acting on.
+        print(f"starting {pid} anyway, but note:")
+        for c in v["cautions"]:
+            print(f"  - {c}")
 
     pdir = sd / pid
     pdir.mkdir(parents=True, exist_ok=True)
@@ -1787,76 +2558,181 @@ def cmd_stop(args) -> int:
 
 
 def cmd_providers(args) -> int:
-    rows = [{"provider": n, "installed": _has(s["bin"]), "models": s["models"],
-             "efforts": sorted(s["efforts"]), "install": s["install"],
-             "effort": "native flag" if s["effort"] == "flag" else "prompt hint"}
-            for n, s in PROVIDERS.items()]
-    rows.append({"provider": "custom", "installed": None, "models": [],
-                 "efforts": [], "install": "", "effort": "template"})
+    """What this machine can actually run a partner in.
+
+    A scan, not a menu. The recipes appear because their flags were verified by
+    hand, not because they are the permitted set -- everything else found on
+    the machine is listed beside them and spawns the same way.
+    """
+    rows = []
+    for c in scan_clis(deep=args.deep):
+        spec = resolve_provider(c["name"])
+        pr = spec.get("probe") or (probe_cli(c["name"]) if c["installed"]
+                                   and spec["kind"] == "recipe" else {})
+        rows.append({**c,
+                     "efforts": sorted(spec["efforts"]),
+                     "effort": {"flag": "native flag", "prompt": "prompt hint"}
+                               .get(spec.get("effort"), "template"),
+                     "version": pr.get("version") if c["installed"] else None})
     if args.json:
-        print(json.dumps(rows, indent=2))
+        print(json.dumps({"clis": rows, "custom": {
+            "usage": "--provider custom --cmd '<template with {prompt}>'"}},
+            indent=2))
         return 0
-    labels = {True: "installed", False: "NOT installed", None: "via --cmd"}
+
+    how = {"recipe": "verified flags", "your config": "your providers.json",
+           "found by name": "found here", "found by behaviour": "found here"}
     for r in rows:
-        print(f"  {r['provider']:8} {labels[r['installed']]:15} "
-              f"effort: {r['effort']:12} models: {', '.join(r['models']) or '-'}")
-        if r["efforts"]:
-            print(f"           {'':15} accepts effort: {', '.join(r['efforts'])}")
-        if r["installed"] is False:
-            print(f"           {'':15} install with: {r['install']}")
-    where = "Orca tab" if orca_bin() else "a new terminal tab"
-    print(f"{NL}Partners will open in {where}.")
-    print("Run `models` for what to point each one at, and what effort suits it.")
+        state = "installed" if r["installed"] else "NOT installed"
+        print(f"  {r['name']:14} {state:14} {how.get(r['how'], r['how']):20} "
+              f"effort: {r['effort']}")
+        if r["installed"]:
+            print(f"  {'':14} {r['path']}")
+            if r["version"]:
+                print(f"  {'':14} {r['version']}")
+            if r["how"].startswith("found"):
+                print(f"  {'':14} no verified recipe -- flags are read from its "
+                      f"--help at spawn time")
+        elif r["install"]:
+            print(f"  {'':14} install with: {r['install']}")
+    if not args.deep:
+        print(f"{NL}`providers --deep` also probes every binary in the user bin "
+              f"directories, which finds an agent CLI whose name gives nothing "
+              f"away.")
+    print(f"Any CLI not listed still works: name it directly "
+          f"(`spawn --provider <bin>`, flags read from its --help), or pass the "
+          f"exact command with `--provider custom --cmd '<template>'`.")
+    where = "an Orca tab" if orca_bin() else "a new terminal tab"
+    print(f"Partners will open in {where}.")
+    print("Run `models --provider <name>` for what to point one at.")
     return 0
 
 
 def cmd_models(args) -> int:
-    """What each provider can be pointed at, and what to pick -- for the human.
+    """What a CLI on this machine can be pointed at -- for the human to choose.
 
-    Recommending is this command's job; deciding is not. A partner is only worth
-    having if it is a model the human trusts to disagree with them, so the point
-    is to put real options in front of them rather than quietly defaulting to
-    whatever a list in this file happened to say when it was written.
+    Every id here was found on the machine: asked of the CLI, read out of its
+    help or its bundle, or taken from the user's own config for it. Nothing is
+    recited from a list in this file, because such a list is wrong within weeks
+    and its wrongness is invisible -- the user simply never sees the model that
+    shipped last month.
+
+    Which is also this command's limit, and it is stated in the output rather
+    than hidden: a model released after the installed CLI was built is
+    mentioned nowhere locally. When this comes back thin or dated, the caller
+    is expected to go and check the vendor's current lineup on the web.
     """
-    provs = [args.provider] if args.provider else list(PROVIDERS)
+    names = [args.provider] if args.provider else \
+        [c["name"] for c in scan_clis() if c["installed"]]
+    if not names:
+        emit(args, {"providers": []},
+             "no agent CLI found on this machine. `providers` shows where it "
+             "looked; install one, or name a binary directly.")
+        return 1
+
     out = []
-    for name in provs:
-        spec = PROVIDERS.get(name)
-        if not spec:
-            emit(args, {"error": "unknown"},
-                 f"unknown provider '{name}'; known: {', '.join(PROVIDERS)}")
-            return 1
-        curated = CATALOG.get(name, [])
-        known = {m["id"] for m in curated}
-        installed = _has(spec["bin"])
-        detected = [] if (args.no_probe or not installed) else \
-            [m for m in discover_models(name) if m not in known]
-        out.append({"provider": name, "installed": installed,
+    for name in names:
+        spec = resolve_provider(name)
+        binary = find_binary(spec.get("bin") or name)
+        models = [] if args.no_probe or not binary else \
+            discover_models(name, binary, deep=args.deep)
+        out.append({"provider": name, "installed": bool(binary),
                     "efforts": sorted(spec["efforts"]),
-                    "effort_kind": "native flag" if spec["effort"] == "flag"
-                    else "prompt hint",
-                    "curated": curated, "detected": detected})
+                    "effort_kind": {"flag": "native flag",
+                                    "prompt": "prompt hint"}
+                                   .get(spec.get("effort"), "template"),
+                    "models": models})
     if args.json:
-        print(json.dumps({"providers": out}, indent=2))
+        print(json.dumps({"providers": out, "note":
+              "Found on this machine, not from a vendor list. A model released "
+              "after this CLI was built appears nowhere here -- check the web "
+              "before telling the user this is everything."}, indent=2))
         return 0
 
     for p in out:
-        state = "" if p["installed"] else "   (NOT installed)"
-        print(f"{NL}{p['provider']}{state}")
-        for m in p["curated"]:
-            star = "  <-- default if they have no preference" if m.get("default") else ""
-            print(f"  {m['id']:34} effort={m['effort']:7}{star}")
-            print(f"  {'':34} {m['note']}")
-        if p["detected"]:
-            print(f"  also mentioned on this machine, not in the curated list "
-                  f"(needs --force):")
-            for m in p["detected"]:
-                print(f"    {m}")
+        print(f"{NL}{p['provider']}" + ("" if p["installed"] else "   (NOT installed)"))
+        if not p["models"]:
+            print("  nothing on this machine names a model for it. Its default "
+                  "model works -- spawn without --model -- or look up the "
+                  "current lineup and pass one with --model.")
+        shown = 0
+        for conf, header in (("named", None),
+                             ("mentioned", "  only the shape of a model id, "
+                                           "found in text -- some of these are "
+                                           "not models:")):
+            group = [m for m in p["models"] if m["confidence"] == conf]
+            if group and header:
+                print(header)
+            for m in group[:12 if conf == "named" else 8]:
+                print(f"  {m['id']:36} effort={m['effort']:7} [{m['tier']}]")
+                print(f"  {'':36} {m['note']}")
+                print(f"  {'':36} from {m['source']}")
+                shown += 1
+            if len(group) > (12 if conf == "named" else 8):
+                print(f"  {'':36} ... and {len(group) - (12 if conf == 'named' else 8)} more")
         print(f"  effort is a {p['effort_kind']}; accepts: {', '.join(p['efforts'])}")
-    print(f"{NL}Put these to the human and let them choose provider, model and "
-          f"effort. Do not pick silently: the curated list is a suggestion that "
-          f"lags the providers, and a partner they did not choose is one they "
-          f"will not believe when it disagrees with them.")
+    print(f"{NL}Where each id came from is printed because it is the whole "
+          f"caveat: a model list command is evidence, a string in a bundle is a "
+          f"lead. The tier note is read off the *name* -- opus/pro/max reason "
+          f"deeper and slower than flash/mini/lite -- not from having tried it.")
+    print(f"{NL}This is what the machine knows, which is not what exists. If "
+          f"the newest id here looks months old, check the provider's current "
+          f"models on the web and offer those too -- they spawn with --model "
+          f"whether or not they appear above.")
+    print(f"{NL}Then put the options to the human and let them choose. A "
+          f"partner they did not pick is one they will not believe when it "
+          f"disagrees with them, which is the entire reason for running it.")
+    return 0
+
+
+def cmd_probe(args) -> int:
+    """Show what was read out of a CLI's --help, and the command it produces.
+
+    The debugging surface for driving a CLI nobody wrote a recipe for. When a
+    partner's tab opens on a usage error, this says which flag was guessed
+    wrong, and the argv line below is what to correct with `--cmd`.
+    """
+    name = args.provider
+    path = name if os.sep in name or "/" in name else None
+    if path:
+        name = Path(path).stem
+    pr = probe_cli(name, path, refresh=args.refresh)
+    spec = resolve_provider(name)
+    demo = None
+    if pr["found"]:
+        try:
+            demo = subprocess.list2cmdline(build_tui(
+                {"provider": name, "model": "<model>", "effort": "high",
+                 "auto": "edits", "cmd": spec.get("cmd")}, "<starting prompt>"))
+        except SystemExit:
+            demo = None
+    if args.json:
+        print(json.dumps({"probe": {k: v for k, v in pr.items() if k != "help"},
+                          "kind": spec["kind"], "example": demo}, indent=2))
+        return 0
+    if not pr["found"]:
+        print(f"{name}: not on PATH. `providers` lists what is; a CLI installed "
+              f"somewhere unusual can still be used with "
+              f"--provider custom --cmd '<full path> ...'")
+        return 1
+    print(f"{name}  ({spec['kind']})")
+    print(f"  binary        {pr['bin']}")
+    print(f"  version       {pr['version'] or '-'}")
+    print(f"  model flag    {pr['model_flag'] or '- (spawns on its default model)'}")
+    print(f"  effort flag   {pr['effort_flag'] or '- (effort becomes a briefing line)'}"
+          + (f"  accepts: {', '.join(pr['efforts'])}" if pr["efforts"] else ""))
+    print(f"  auto          " + (", ".join(f"{k}={' '.join(v)}"
+                                           for k, v in pr["auto"].items())
+                                 or "- (it may stop and ask in its tab)"))
+    print(f"  prompt        {pr['prompt_flag'] or 'positional (appended last)'}")
+    print(f"  model list    {' '.join(pr['list_cmd']) if pr['list_cmd'] else '-'}")
+    if demo:
+        print(f"{NL}  a spawn would run:{NL}    {demo}")
+    if spec["kind"] == "probed":
+        print(f"{NL}Read from its own --help, not from a verified recipe. If "
+              f"that command is wrong, correct it with:{NL}"
+              f"  spawn --provider custom --cmd '<the right command with "
+              f"{{prompt}}>'")
     return 0
 
 
@@ -1983,14 +2859,27 @@ def main() -> int:
     i.add_argument("--context", default=None, help="handoff text, or path to a file")
     i.set_defaults(fn=cmd_init)
 
-    sub.add_parser("providers").set_defaults(fn=cmd_providers)
+    pv = sub.add_parser("providers", help="agent CLIs found on this machine")
+    pv.add_argument("--deep", action="store_true",
+                    help="also probe unrecognised binaries in the user bin "
+                         "dirs and keep whatever behaves like an agent CLI")
+    pv.set_defaults(fn=cmd_providers)
 
-    md = sub.add_parser("models", help="models to choose from, and the effort "
-                                       "that suits each")
-    md.add_argument("--provider", default=None, help="just this one")
+    md = sub.add_parser("models", help="models found on this machine, and the "
+                                       "effort that suits each")
+    md.add_argument("--provider", default=None,
+                    help="just this one; any CLI name, not only a known one")
     md.add_argument("--no-probe", action="store_true",
-                    help="skip the CLI probe; curated list only")
+                    help="do not run or read the CLI at all")
+    md.add_argument("--deep", action="store_true",
+                    help="always scan the CLI's own bundle, not only when the "
+                         "cheap sources came back thin")
     md.set_defaults(fn=cmd_models)
+
+    pb = sub.add_parser("probe", help="what a CLI's --help says about driving it")
+    pb.add_argument("--provider", required=True, help="CLI name or path")
+    pb.add_argument("--refresh", action="store_true", help="ignore the cache")
+    pb.set_defaults(fn=cmd_probe)
     sub.add_parser("list").set_defaults(fn=cmd_list)
     sub.add_parser("snapshot").set_defaults(fn=cmd_snapshot)
 

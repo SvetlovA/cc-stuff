@@ -2,13 +2,15 @@
 name: partner
 description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
 argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | stop"
-allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion
-version: 0.8.0
+allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch
+version: 0.13.0
 ---
 
 # Partner
 
-Run several AI agents — Claude, Codex, Gemini, or any CLI — as equal partners on one repository, each in its own terminal tab, debating every question through a shared transcript before anyone acts.
+Run several AI agents — whatever agent CLIs this machine has, plus any you describe — as equal partners on one repository, each in its own terminal tab, debating every question through a shared transcript before anyone acts.
+
+The providers and models on offer are **discovered, never recited**: the CLIs come from a scan of this machine, the model ids from those CLIs and the user's own config for them. Nothing is read off a list baked into the plugin, because such a list is stale within weeks and its staleness is invisible.
 
 A partner is not a subagent. It is a full interactive session with its own model and its own opinion, and it can tell you that you are wrong. The point is friction: two models that disagree surface assumptions one alone glides past. The user can type at any of them directly; between interruptions each watches the transcript and answers the others on its own.
 
@@ -92,24 +94,39 @@ python "$P" resume --session 20260905-185718     # bring an archived one back
 
 Four settings define a new partner: **provider**, **model**, **effort**, and **auto** level. Take whatever the user supplied and only ask about the rest.
 
+**Never offer a list of providers or models from memory.** There is no bundled catalog to recite, and a remembered one is wrong within weeks — invisibly, because the user simply never sees the model that shipped last month. Both lists come from the machine, every time:
+
 ```bash
-python "$P" providers                # which CLIs are installed at all
-python "$P" models                   # what to point them at, and the effort that suits each
+python "$P" providers                # agent CLIs actually installed here
+python "$P" models --provider <X>    # ids this machine names, and the effort that suits each
 ```
 
-`models` is the one to read before offering anything. It prints the curated list **and** the model ids this machine actually mentions — from the CLI's own help and the user's provider config — because a list baked into the script always lags the providers. Anything under "also mentioned on this machine" is real enough to offer; it just needs `--force`, since appearing in a config file is not proof it exists.
+`providers` scans PATH and the per-user install dirs and keeps what behaves like an agent CLI. Whatever it lists can be spawned, known to this plugin or not — and what it misses is still usable, so it is a suggestion, never a gate.
+
+`models` splits ids into **named** (the CLI's own list, or a `model` setting in the user's config — solid) and **mentioned** (text merely shaped like a model id — offer them labelled). Details of either: `references/providers.md`.
+
+**Check the web when the local answer is thin or dated.** A model released after the installed CLI was built is mentioned nowhere on this machine. Search for that provider's current lineup, offer what you find alongside the local ids, and say which is which — anything can be passed to `--model` whether or not the scan saw it.
 
 **Never pick the model silently.** Put the options to the user with `AskUserQuestion` — installed providers first, each with the effort `models` recommends and its one-line character note. A partner the user did not choose is one they will not believe when it disagrees with them, which is the entire point of running it. Ask even when they supplied the provider, unless they also named the model.
 
-When they genuinely say "just pick": take the entry marked as the default, and a provider *different from your own model* — same-model agents tend to agree with you. Say which you chose and why, so they can correct it.
+When they genuinely say "just pick": the newest **named** id in a balanced or deep tier, from a provider *different from your own model* — same-model agents tend to agree with you. Say which you chose and why.
 
-Validate before spawning: `python "$P" check --provider codex --model gpt-5-codex --effort high`. `spawn` runs the same checks and refuses rather than opening a doomed tab, but `check` first lets you fix it in conversation. Each problem comes back with the command that fixes it — relay it verbatim. An unknown model is the one soft failure: offer `--force` rather than arguing.
+Validate before spawning: `python "$P" check --provider codex --model gpt-5.6 --effort high`. A **problem** stops the spawn and carries the command that fixes it — relay that verbatim. A **caution** is the script not recognising something, not evidence it is wrong; pass it on and continue. An unrecognised model is always a caution.
 
 **Auto levels** control how often a partner stops to ask permission — a prompt in an unwatched tab stalls the debate. `--auto edits` (default) accepts file edits while keeping the sandbox; `ask` keeps normal prompting; `full` removes both. Per-provider flags: `references/providers.md`.
 
-For a CLI not in the registry, use `--provider custom` with a command template such as `--cmd 'aider --model {model} --yes --message {prompt}'`. Placeholders, per-provider flags and how to add a provider: `references/providers.md`.
+### Step 1b — A CLI this plugin does not know
 
-Put the CLI's own "stop asking me" flag in that template — `--auto` only maps onto providers the registry knows.
+Naming the binary is the normal case and needs no configuration — its flags are read from its own `--help`:
+
+```bash
+python "$P" probe --provider mycli     # the flags derived, and the command a spawn would run
+python "$P" spawn --provider mycli --model ... --effort high
+```
+
+Run `probe` first when in doubt. If the derived command is wrong, give the exact one with `--provider custom --cmd 'mycli --model {model} --yes --message {prompt}'` — and put the CLI's own "stop asking me" flag in it, since `--auto` cannot reach into a hand-written template.
+
+To keep a CLI between sessions, describe it once in `~/.claude/partner-providers.json`; it then works as a plain `--provider` name. Format, placeholders and the probe's rules: `references/providers.md`.
 
 ### Step 2 — Brief the partner on what it is joining
 
@@ -175,8 +192,9 @@ Skip the loop only for mechanical lookups. Anything involving a design choice, a
 ## Reference
 
 ```bash
-python "$P" providers                       # what is installed, models, efforts, where tabs open
-python "$P" models [--provider X] [--no-probe]  # curated + detected models, recommended effort
+python "$P" providers [--deep]              # agent CLIs found here; --deep probes unnamed ones
+python "$P" models [--provider X] [--deep] [--no-probe]   # ids found on this machine + effort
+python "$P" probe --provider X [--refresh]  # flags read from a CLI's own --help
 python "$P" check --provider X [--model M] [--effort E] [--force]
 python "$P" list                            # everyone here + who holds the baton
 python "$P" state                           # who is ALIVE + what to do next
@@ -210,7 +228,7 @@ A `Stop` hook (`hooks/hooks.json`) stops any agent — this session included —
 
 ## Deeper reference
 
-- `references/providers.md` — per-provider launch flags, how auto levels and effort map onto each CLI, and how to add a provider.
+- `references/providers.md` — how CLIs and models are discovered on the machine, per-provider launch flags, auto levels and effort, and how to use or keep a custom CLI.
 - `references/protocol.md` — transcript format, state layout, and how an agent takes part from inside its tab.
 - `references/debate.md` — the full debate loop, step by step.
 - `references/troubleshooting.md` — symptoms, causes and fixes.

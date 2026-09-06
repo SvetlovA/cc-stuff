@@ -2,13 +2,16 @@
 
 Run several AI agents as equal partners on one repo, each in its own terminal tab, and argue with them before you commit to anything.
 
-A partner is a **separate process** with its own provider, model, and context — not a subagent. Claude can run the debate against Codex, Gemini, or any CLI you can describe in one line, and the disagreement is the product: two models that differ surface the assumptions one model alone glides past.
+A partner is a **separate process** with its own provider, model, and context — not a subagent. Claude can run the debate against whichever agent CLIs are on your machine, or any CLI you can describe in one line, and the disagreement is the product: two models that differ surface the assumptions one model alone glides past.
 
 ## What it does
 
 - **Spawns partners into real terminal tabs** on Windows, macOS, and Linux — Windows Terminal, iTerm2, Terminal.app, GNOME Terminal, Konsole, WezTerm, kitty, tmux, and zellij are all detected automatically.
 - **Native Orca support.** Running inside [Orca](https://orca.computer)? Partners open as Orca tabs in the current worktree, beside the session that spawned them — not in a detached OS window. Detected automatically, with the normal terminal flow as fallback.
-- **Tells you before it fails.** Checks the CLI is installed and actually runs, the effort level is one that provider accepts, and the model is one it knows — each problem reported with the command that fixes it, before a tab is opened.
+- **Finds your CLIs instead of assuming them.** No bundled list of blessed providers. It scans PATH *and* the per-user install directories (`~/.local/bin`, npm's prefix, `%LOCALAPPDATA%\Programs`, cargo, bun, winget…), then keeps only what behaves like an agent CLI — its own `--help` has to mention a model and accept a task in words. `gpg-agent` does not qualify; a coding agent you installed last week does, whether or not this plugin has heard of it.
+- **Reads models off your machine, not off a list.** A catalog baked into a plugin is wrong within weeks, and the wrongness is invisible — you just never see the model that shipped last month. Instead: the CLI's own model list where it has one, the `model` settings in your config for it, its help output, its program files. Ids are grouped by how much the source proves, sorted newest-first, and annotated from the *name shape*, so `whatever-pro-7` is described correctly the first time it exists.
+- **Any CLI, three ways.** Name a binary directly and its flags are read from `--help`; pass the exact command with `--cmd 'mycli --model {model} --yes {prompt}'`; or describe it once in `~/.claude/partner-providers.json` and use it by name forever after.
+- **Tells you before it fails.** Checks the CLI is installed and actually runs, and the effort level is one that provider accepts — each hard problem reported with the command that fixes it, before a tab is opened. Things it merely does not *recognise* are said out loud and then done anyway.
 - **Every partner is a full interactive session.** Walk into any tab and type at that agent directly — it answers you, then goes back to debating. Between your interruptions it drives itself.
 - **No permission dialogs to babysit.** Partners start with prompting relaxed (`--auto ask | edits | full`), so you are not approving edits in three tabs at once.
 - **Joins mid-work with the context intact.** Spawn a partner twenty exchanges into a hard problem and it arrives knowing the branch, the uncommitted diff, and the argument so far — plus whatever briefing you write. Each partner keeps its own, so adding a third never overwrites what the second was told.
@@ -56,14 +59,59 @@ Then just keep working. Every question after that gets debated before it gets an
 | `codex` | `model_reasoning_effort` (native) | `-a never -s workspace-write` |
 | `gemini` | prompt hint | `--approval-mode auto_edit` |
 | `custom` | template | your own flag, in the template |
+| anything else on your machine | read from its `--help` | read from its `--help` |
 
-Anything else works through a one-line template:
+Those three rows are hand-verified launch flags, not the permitted set. Any other agent CLI is driven from its own help text:
+
+```bash
+partner.py providers            # what is installed here, and how each will be driven
+partner.py providers --deep     # also probe binaries whose names give nothing away
+partner.py probe --provider mycli   # the flags read from its help, and the command a spawn runs
+partner.py spawn --provider mycli --model ... --effort high
+```
+
+Probing is conservative: a flag it did not find is a flag it does not pass, so an unknown CLI launches on its own defaults rather than on a guess. `--auto edits` deliberately never falls back to a sandbox-bypass flag.
+
+When the derived command is wrong, give the exact one:
 
 ```bash
 /partner custom --cmd 'aider --model {model} --yes --message {prompt}'
 ```
 
-`python partner.py providers` reports which are installed on the current machine.
+...or keep it, in `~/.claude/partner-providers.json` (or `.partner/providers.json` for one repo):
+
+```json
+{
+  "aider": {
+    "cmd": "aider --model {model} --yes --message {prompt}",
+    "efforts": ["low", "medium", "high"],
+    "install": "pipx install aider-chat"
+  }
+}
+```
+
+It then appears in `providers` and spawns as `--provider aider` with no template on the command line.
+
+## Picking a model
+
+```
+$ partner.py models --provider codex
+codex
+  gpt-5.6-luna                    effort=high    [general]
+                                  no tier signal in the name -- try it and see
+                                  from a model setting in your config.toml
+  only the shape of a model id, found in text -- some of these are not models:
+  gpt-5.6                         effort=high    [general]
+  gpt-5.4-mini                    effort=low     [fast]
+                                  fast and cheap; concedes too easily to be much of an opponent
+  effort is a native flag; accepts: high, low, medium
+```
+
+Everything printed was found on this machine, and where it came from is printed with it, because that is the whole caveat: a model list command is evidence, a string in a bundle is a lead.
+
+The tier note is read off the **name**, not from a table of ids — `opus`/`pro`/`max` reason deeper and slower than `flash`/`mini`/`lite`. Shapes stay true for models that do not exist yet, which is why it is phrased that way.
+
+The limit is stated in the output rather than hidden: a model released after your CLI was built is mentioned nowhere locally. When the list looks thin or dated, the skill checks the provider's current lineup on the web and offers those alongside — they spawn with `--model` either way.
 
 ## Requirements
 
@@ -110,11 +158,19 @@ Sessions are labelled by the first real thing said in them, so the list reads as
 ```
 $ partner.py check --provider codex --effort max
 cannot start this partner:
-  - effort 'max' is not supported by codex. Use one of: high, low, medium.
-    ('max' is this skill's own level; use 'high' for a real flag.)
+  - effort 'max' is not accepted by codex. Use one of: high, low, medium.
+    ('max' is this skill's own level; 'high' is the real flag.)
+
+$ partner.py check --provider codex --model gpt-9-imaginary --effort high
+ok: codex / gpt-9-imaginary / effort=high
+  worth knowing:
+  - 'gpt-9-imaginary' is not among the ids this machine names for codex
+    (gpt-5, gpt-5.4, gpt-5.6...). Not proof it is wrong -- a new model is
+    mentioned nowhere locally until it is used once -- but worth checking
+    the spelling.
 ```
 
-`spawn` runs the same checks and refuses rather than opening a tab that flashes an error and vanishes. Install and effort problems are hard failures; an unrecognised model is soft, since model names change faster than this plugin does — pass `--force` to use one anyway.
+Two severities, and the split is the point. A **problem** is something no amount of insisting fixes — a CLI that is not installed, an effort value the API will reject — and it stops the spawn. A **caution** is the plugin not recognising something, which is not evidence of anything: it gets said, and the spawn proceeds. Refusing an unknown model until you passed `--force` meant a model released last week needed a flag to try.
 
 ## How it works
 

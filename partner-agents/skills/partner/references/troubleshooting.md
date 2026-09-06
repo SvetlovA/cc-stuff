@@ -8,7 +8,17 @@
 
 **Only yourself in `list` after spawning.** The spawn never ran. Registering yourself is not the deliverable — go back and run `spawn`.
 
-**Spawn refused with a list of problems.** That is validation, not a crash — each line ends with the command that fixes it.
+**Spawn refused with a list of problems.** That is validation, not a crash — each line ends with the command that fixes it. Only hard problems refuse; anything under "worth knowing" is a caution and the spawn went ahead.
+
+**The CLI the user wants is not in `providers`.** The scan keeps only binaries whose `--help` reads like an agent CLI, and it skips system directories. Try `providers --deep`, which probes by behaviour instead of by name. Failing that the list is not a gate: `spawn --provider <bin>` works on any binary, with flags read from its help — run `probe --provider <bin>` first to see what those will be.
+
+**A partner's tab opens on a usage error and closes.** Its flags were probably derived from `--help` and got something wrong. `probe --provider <name>` prints the exact command a spawn builds; `.partner/<id>/run.cmd` (or `run.sh`) holds the one that was actually used. Correct it with `--provider custom --cmd '<the right command with {prompt}>'`, or keep the fix in `~/.claude/partner-providers.json`.
+
+**A partner keeps stopping to ask permission.** Its CLI advertised no accept-edits flag, so `--auto edits` passed nothing — deliberately, since substituting a sandbox-bypass flag would silently do far more than was asked. `probe` shows which auto levels it found. Either pass the CLI's own flag in a `--cmd` template, or spawn with `--auto full` if that is genuinely wanted.
+
+**`models` lists junk, or nothing.** Ids under "only the shape of a model id" are text that merely looks like a model — that heading is the warning. An empty list means nothing on this machine names a model for that CLI: its default model still works (spawn without `--model`), or look the current lineup up on the web and pass one. A model released after the CLI was built is mentioned nowhere locally.
+
+**A model the user knows exists is flagged as unrecognised.** Expected, and it does not block — the check compares against what this machine happens to name, which is not what exists. Spawn it.
 
 **Partner never replies.** Check its tab: a permission prompt (raise `--auto`), an error, or simply between `wait` calls.
 
