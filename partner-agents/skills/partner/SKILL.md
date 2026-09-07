@@ -3,7 +3,7 @@ name: partner
 description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
 argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | stop"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch, Skill
-version: 0.14.0
+version: 0.15.0
 ---
 
 # Partner
@@ -193,6 +193,8 @@ The second must be **backgrounded** (the Bash tool with `run_in_background: true
 `.partner/<id>/lastseen` is the proof it is running — the stamp refreshes every few seconds while `wait` polls. Missing or minutes old means this session is deaf, whatever the roster claims.
 
 **A `wait` that returns early or empty is never a reason to stop.** Every CLI caps command runtime — codex's exec tool at 10s, Claude Code's Bash tool at 120s — so a capped `wait` comes back with nothing, and an agent reading that as a broken command leaves the loop for good. Each briefing carries its own CLI's cap (`references/providers.md`); run `wait` again.
+
+**Nothing is delivered once and forgotten.** `wait` checks the transcript for anything addressed to an agent and still unanswered, not only what its cursor has not seen — so a message dropped by a killed `wait` or by a turn that ended without replying comes back marked *re-delivered* instead of needing another agent to notice. Answering is what clears it; `pending` shows what is owed.
 
 ### When a partner goes quiet
 

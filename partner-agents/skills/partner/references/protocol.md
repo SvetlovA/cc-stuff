@@ -75,9 +75,11 @@ Because partners launch with permission prompting relaxed, this is a rule agents
     ├── lastseen       heartbeat: when this agent last acted
     ├── waiting        present only while a `wait` is actually polling
     ├── .nudge         when this agent was last woken (throttle)
+    ├── .redeliver     when it was last handed its unanswered backlog
     ├── seed.md        the briefing this agent was launched with
     ├── handoff.md     what was decided before it joined
-    ├── cursor         byte offset of the last message it consumed
+    ├── cursor         byte offset of the last message handed to it
+    ├── floor          byte offset where its responsibility starts
     └── run.cmd|.sh    the exact command its terminal tab runs
 ```
 
@@ -146,13 +148,41 @@ Body text. Markdown, any length.
 
 Append only. Rewriting history breaks every agent's cursor and silently drops messages.
 
-## Cursors
+## Cursors, floors, and re-delivery
 
-Each agent tracks a byte offset into `chat.md`. `read` and `wait` return messages after that offset that are addressed to it or `@all` and were not sent by it, then advance the offset.
+Each agent tracks two byte offsets into `chat.md`:
 
-`read --peek` reads without advancing — useful for inspecting what an agent is about to see without consuming it.
+- **`cursor`** — how far it has been *handed* messages. `read` and `wait` return messages after it that are addressed to the agent or `@all` and were not sent by it.
+- **`floor`** — where its responsibility starts, written when it joins or is resumed. Everything above the floor is history it was briefed on, not mail it owes an answer to.
 
-Because the cursor is a byte offset rather than a message index, an agent that was closed and restarted resumes exactly where it left off.
+`read --peek` reads without advancing the cursor — useful for inspecting what an agent is about to see without consuming it.
+
+Because these are byte offsets rather than message indexes, an agent that was closed and restarted resumes exactly where it left off.
+
+### The cursor moves only after delivery succeeds
+
+`read_new` does not advance the cursor; `commit_cursor` does, after the output has been printed and flushed. The two were one step until a message went missing: a `wait` killed between "cursor advanced" and "output reached the model" consumed the message and lost it, and no later `wait` could return it, because the cursor was already past. That is not a rare race — codex terminates a command after 10s by default, so a wait is killed routinely. Delivering a message twice costs a duplicate; delivering it zero times costs the debate a participant.
+
+### `wait` asks the transcript, not just the cursor
+
+The cursor answers "has this been handed over", which stops being the right question the moment a handover fails. Two ways it fails, and both used to be unrecoverable from inside:
+
+- a `wait` killed mid-print, as above;
+- an agent that was given a message and ended its turn without replying — the cursor is past it, so nothing will ever show it again.
+
+Either way the message is gone until another agent notices the silence and pings. So `wait` also asks a cursor-free question every poll: *is anything addressed to me, after my own last message, still unanswered?* — `pending_for`, the same check the Stop hook uses, bounded below by the floor. Anything older than `REDELIVER_AFTER` (45s) comes back marked **re-delivered**, and a reply is what clears it.
+
+Three things keep that from becoming noise:
+
+- **New messages win.** Re-delivery only runs when nothing new arrived, so the normal cycle never sees it.
+- **The age threshold.** A message being replied to right now is being worked on, not dropped.
+- **A throttle.** `<id>/.redeliver` holds off repeats for 90s, so an agent that cannot answer is reminded at a bounded rate instead of spinning through instant returns.
+
+`read` shows the same backlog under "still unanswered, from earlier", with no age threshold — an agent running `read` is asking what it owes.
+
+The floor is what makes this safe for a new partner: without it, an agent that has never spoken would owe a reply to every `@all` message in the transcript and answer the entire backlog on its first `wait` — the failure the cursor reset was introduced to prevent.
+
+This and the nudge cover different halves of the same problem. Re-delivery recovers a message an agent dropped while it was still looping; the nudge recovers an agent that stopped looping at all. An agent woken by a nudge is told to run `read`, which is exactly where its unanswered backlog is waiting.
 
 ## How an agent takes part
 
@@ -270,6 +300,8 @@ That is the right place for the rule. A deadlock between two models is a genuine
 **An agent reopening a settled question.** It joined without the history, or `--context` never said the question was closed. Check `.partner/<id>/handoff.md`.
 
 **An agent talking to itself.** `read` and `wait` filter out messages the reader sent (`m["from"] != who`), so an agent cannot trigger its own next round — including the session agent's background `wait`.
+
+**A message nobody ever answered.** It was handed over and dropped — a killed `wait`, or a turn that ended without a reply. `wait` re-delivers anything addressed to an agent and unanswered after 45s, and `read` lists it under "still unanswered", so recovery no longer depends on another agent noticing. A message that keeps coming back marked *re-delivered* means the agent is receiving it and not replying; `pending --for <id>` shows what it owes.
 
 **The session agent idle while the human works in a tab.** It had no background `wait` armed, so nothing re-invoked it when a partner addressed `@all`. Its briefing arms one at the end of every turn; if it stopped, the next human turn in the main session re-arms it, and the Stop hook blocks it from ending a turn with an unanswered message in the meantime. Check `.partner/<id>/lastseen` — a fresh stamp means the background `wait` is running.
 

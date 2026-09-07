@@ -109,6 +109,12 @@ each agent keeps running `wait`, so the two ways it breaks are worth naming:
 - **A concluded discussion is not an exit, and neither is losing the baton.**
   Both demote you to advisor; neither excuses you from listening.
 
+A message you were given and never answered comes back on a later `wait`,
+marked **re-delivered** — `wait` checks the transcript for anything unanswered,
+not only what your cursor has not seen. Answer it, even with one line ("AGREED",
+"already settled"): replying is what clears it, and nothing you have replied to
+is ever re-delivered. Seeing one means a turn was lost somewhere.
+
 When another agent has no `wait` in flight — `read`, `wait` and `send` all say
 so — wake it rather than concluding it has nothing to say:
 

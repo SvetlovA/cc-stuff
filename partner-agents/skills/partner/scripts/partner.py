@@ -56,6 +56,12 @@ NUDGE_WINDOW = 120         # seconds between nudges to the same silent agent
 # reaching the first `wait`; short enough that a human typing at a new partner
 # is rarely caught by it, and `claim --force` covers them when they are.
 CLAIM_GRACE = 90
+# A message addressed to an agent that it has not answered is re-delivered by
+# `wait` once it is this old -- long enough that a reply already in progress is
+# never mistaken for a dropped message, short enough that a real drop costs one
+# cycle rather than a partner noticing the silence.
+REDELIVER_AFTER = 45
+REDELIVER_WINDOW = 90      # seconds between re-deliveries of the same backlog
 
 
 # --------------------------------------------------------------------------
@@ -268,6 +274,7 @@ def cmd_init(args) -> int:
     if fresh:
         write_briefing(sd, me, roster, root, Path(__file__).resolve(),
                        getattr(args, "context", None), kind="session")
+        set_floor(sd, me)          # owes nothing for what was said before it
     git_exclude(root)
     emit(args, {"state_dir": str(sd), "repo_root": str(root), "self": me},
          f"initialized {sd} (you are {me}; briefing at {sd / me / 'seed.md'})")
@@ -309,26 +316,64 @@ def parse_msgs(text: str) -> list[dict]:
     return out
 
 
-def read_new(sd: Path, who: str, advance: bool = True) -> list[dict]:
-    """Messages addressed to `who` (or @all) that `who` has not yet consumed."""
+def _offset(sd: Path, who: str, name: str, cap: int) -> int:
+    f = sd / who / name
+    if not f.exists():
+        return 0
+    try:
+        return min(int(f.read_text(encoding="utf-8").strip() or 0), cap)
+    except (OSError, ValueError):
+        return 0
+
+
+def read_new(sd: Path, who: str) -> tuple[list[dict], int]:
+    """Messages addressed to `who` (or @all) that `who` has not yet consumed,
+    plus the offset that consuming them would move the cursor to.
+
+    The cursor is deliberately *not* moved here. Advancing it before the caller
+    has printed anything means a command killed in between -- which is routine,
+    since codex terminates a command after 10s by default -- consumes the
+    message and loses it: no later `wait` can return it, because the cursor is
+    already past it. `commit_cursor` is called after the output is flushed, so
+    a killed wait re-delivers instead of swallowing.
+    """
     chat = sd / "chat.md"
     if not chat.exists():
-        return []
+        return [], 0
     raw = chat.read_bytes()
-    cur_f = sd / who / "cursor"
-    start = 0
-    if cur_f.exists():
-        try:
-            start = min(int(cur_f.read_text(encoding="utf-8").strip() or 0), len(raw))
-        except ValueError:
-            start = 0
+    start = _offset(sd, who, "cursor", len(raw))
     fresh = raw[start:].decode("utf-8", errors="replace")
     msgs = [m for m in parse_msgs(fresh)
             if m["from"] != who and m["to"] in (who, "@all", "all")]
-    if advance:
+    return msgs, len(raw)
+
+
+def commit_cursor(sd: Path, who: str, end: int) -> None:
+    """Mark everything up to `end` as delivered. Called only after the messages
+    have actually been written out."""
+    try:
+        cur_f = sd / who / "cursor"
         cur_f.parent.mkdir(parents=True, exist_ok=True)
-        cur_f.write_text(str(len(raw)), encoding="utf-8")
-    return msgs
+        cur_f.write_text(str(end), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def set_floor(sd: Path, who: str) -> None:
+    """Record where this agent's responsibility starts.
+
+    Everything before the floor is history it was briefed on rather than mail
+    it owes an answer to. Without it, "unanswered" would mean the entire
+    transcript for an agent that has not spoken yet, and a new partner would be
+    handed the whole backlog to reply to.
+    """
+    chat = sd / "chat.md"
+    try:
+        (sd / who).mkdir(parents=True, exist_ok=True)
+        (sd / who / "floor").write_text(
+            str(chat.stat().st_size if chat.exists() else 0), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def tail_msgs(sd: Path, n: int) -> list[dict]:
@@ -357,12 +402,37 @@ def pending_for(sd: Path, roster: dict, who: str) -> list[dict]:
     chat = sd / "chat.md"
     if not chat.exists():
         return []
-    convo = [m for m in parse_msgs(chat.read_text(encoding="utf-8", errors="replace"))
-             if m["from"] != "system"]
+    raw = chat.read_bytes()
+    # From this agent's floor, not from the top of the file: what was said
+    # before it joined is briefing material, not mail it owes a reply to.
+    text = raw[_offset(sd, who, "floor", len(raw)):].decode("utf-8", errors="replace")
+    convo = [m for m in parse_msgs(text) if m["from"] != "system"]
     my_last = max((i for i, m in enumerate(convo) if m["from"] == who), default=-1)
     return [m for i, m in enumerate(convo)
             if i > my_last and m["from"] != who
             and m["to"] in (who, "@all", "all")]
+
+
+def dropped_for(sd: Path, roster: dict, who: str,
+                min_age: int = REDELIVER_AFTER) -> list[dict]:
+    """Messages this agent was given and never answered.
+
+    The cursor answers "has this been handed over", which stops being the right
+    question the moment a handover fails: a `wait` killed mid-print, or an agent
+    that read a message and then ended its turn, both leave the message consumed
+    and unanswerable -- invisible to every later `wait`, recoverable only by
+    another agent noticing the silence and pinging.
+
+    So `wait` asks the transcript instead of the cursor. `min_age` keeps the
+    normal cycle out of it: a message being replied to right now is not dropped,
+    it is being worked on.
+    """
+    out = []
+    for m in pending_for(sd, roster, who):
+        age = _age_seconds(m.get("ts"))
+        if age is None or age >= min_age:
+            out.append(m)
+    return out
 
 
 def baton_banner(roster: dict, who: str) -> str:
@@ -413,7 +483,7 @@ def cmd_wait(args) -> int:
     try:
         while True:
             touch_seen(sd, who)          # still here, still listening
-            msgs = read_new(sd, who)
+            msgs, end = read_new(sd, who)
             if msgs:
                 roster = load_roster(sd)
                 if args.json:
@@ -422,6 +492,34 @@ def cmd_wait(args) -> int:
                 else:
                     print(baton_banner(roster, who) + NL * 2 + render(msgs)
                           + silence_notice(sd, roster, who))
+                # Only now, once the messages are actually out: a wait killed
+                # before this point re-delivers rather than losing them.
+                sys.stdout.flush()
+                commit_cursor(sd, who, end)
+                return 0
+
+            # Nothing new -- but the cursor only records what was handed over,
+            # not what was answered. Anything addressed to this agent that it
+            # never replied to comes back here, which is what stops a dropped
+            # message from needing another agent to notice and ping.
+            roster = load_roster(sd)
+            dropped = dropped_for(sd, roster, who)
+            if dropped and not _nag_throttled(sd / who / ".redeliver",
+                                              REDELIVER_WINDOW):
+                if args.json:
+                    print(json.dumps({"baton": baton_of(roster), "you": who,
+                                      "messages": dropped, "redelivered": True},
+                                     indent=2))
+                else:
+                    print(baton_banner(roster, who) + NL * 2 + render(dropped)
+                          + NL * 2
+                          + "[re-delivered: addressed to you, still unanswered. "
+                            "You were given this before and did not reply -- "
+                            "answer it with `send` (even just to disagree or to "
+                            "say it is settled). Replying is what clears it.]"
+                          + silence_notice(sd, roster, who))
+                sys.stdout.flush()
+                commit_cursor(sd, who, end)
                 return 0
             if time.time() >= deadline:
                 # An idle cycle is the cheapest moment to notice that somebody
@@ -1979,6 +2077,13 @@ never pass an id:
 `wait` and `read` never return your own messages -- raising a point cannot
 trigger you to answer it yourself.
 
+`wait` checks the whole transcript, not only what you have not seen yet: a
+message addressed to you that you never answered comes back marked
+**re-delivered**. That means you were given it and dropped it -- a reply is what
+clears it, even a one-line "AGREED" or "already settled". Nothing you have
+replied to is ever re-delivered, so seeing one is information: you lost a turn
+somewhere.
+
     See who is here and who holds the write baton:
         {run} list
 
@@ -2370,6 +2475,10 @@ def cmd_spawn(args) -> int:
     (pdir / "cursor").write_text(
         str(chat_now.stat().st_size if chat_now.exists() else 0),
         encoding="utf-8")
+    # Same offset as a floor: everything above it is history this agent was
+    # briefed on, not mail it owes an answer to. Without it, "unanswered" would
+    # mean the whole transcript for an agent that has not spoken yet.
+    set_floor(sd, pid)
 
     manual = (f'cmd /c "{runner}"' if os.name == "nt" else f'bash "{runner}"')
     spec = (f"{args.provider}"
@@ -2608,6 +2717,8 @@ def cmd_resume(args) -> int:
                        f"{'/' + entry['model'] if entry.get('model') else ''})"
                        f"{' -> ' + label if label else ''}")
         (sd / pid / "cursor").write_text(str(end), encoding="utf-8")
+        # A resumed agent owes nothing for the transcript it was re-briefed on.
+        set_floor(sd, pid)
 
     write_wrappers(sd, script)
     save_roster(sd, roster)
@@ -2973,14 +3084,28 @@ def cmd_read(args) -> int:
     roster = load_roster(sd)
     who = args.who or me_id(roster)
     touch_seen(sd, who)
-    msgs = read_new(sd, who, advance=not args.peek)
+    msgs, end = read_new(sd, who)
+    # Anything addressed to this agent that it never answered, whether or not
+    # the cursor has already passed it. `read` is where an agent checks what it
+    # owes, so a dropped message has to show up here too.
+    seen_ts = {m["ts"] for m in msgs}
+    dropped = [m for m in dropped_for(sd, roster, who, min_age=0)
+               if m["ts"] not in seen_ts]
     if args.json:
         print(json.dumps({"baton": baton_of(roster), "you": who,
-                          "messages": msgs}, indent=2))
+                          "messages": msgs, "unanswered": dropped}, indent=2))
     else:
-        print(baton_banner(roster, who) + NL * 2
-              + (render(msgs) or "(nothing new)")
+        body = render(msgs) or "(nothing new)"
+        if dropped:
+            body += (f"{NL * 2}--- still unanswered, from earlier ---{NL * 2}"
+                     f"{render(dropped)}{NL * 2}"
+                     f"[you were given these before and have not replied. "
+                     f"Answering with `send` is what clears them.]")
+        print(baton_banner(roster, who) + NL * 2 + body
               + silence_notice(sd, roster, who))
+    sys.stdout.flush()
+    if not args.peek:
+        commit_cursor(sd, who, end)
     return 0
 
 
