@@ -73,7 +73,7 @@ Because partners launch with permission prompting relaxed, this is a rule agents
 └── <id>/
     ├── p.cmd / p.sh   this agent's wrapper -- carries its PARTNER_ID
     ├── lastseen       heartbeat: when this agent last acted
-    ├── waiting        present only while a `wait` is actually polling
+    ├── waiting        who is polling right now: token, pid, deadline, heartbeat
     ├── .nudge         when this agent was last woken (throttle)
     ├── .redeliver     when it was last handed its unanswered backlog
     ├── seed.md        the briefing this agent was launched with
@@ -102,6 +102,7 @@ Past sessions live alongside, each a complete copy of the above:
 `roster.json` records `status: "running"` because nothing has told it otherwise. Close a tab and the claim survives, so it cannot decide whether to add a partner or start over. Liveness is evidence instead:
 
 - **Heartbeat.** Every agent writes `<id>/lastseen` whenever it runs `wait`, `read`, `send` or `claim`. Acting is what proves it is alive, and `wait` returns within its timeout (90s by default) and loops, so a working agent stamps at least every couple of minutes. Default window is 360s.
+- **Listener heartbeat.** Separately, a polling `wait` refreshes `<id>/waiting` every cycle. That answers a different question — *is anyone listening right now* — and it is refreshed rather than merely created, so a `wait` that was killed stops proving it exists instead of leaving a marker that lies.
 - **Tab list.** Where the terminal can enumerate its own tabs (`list` + `list_titles` on its entry), that reports whether a tab titled `partner:<id>` still exists — better evidence than a heartbeat, since it describes the tab rather than what the agent last did in it. Terminals that cannot enumerate leave the heartbeat as the only evidence, and some rename tabs from the running process, so a missing title is treated as weak evidence and only ever downgrades an agent that has *also* stopped checking in.
 
 A **fresh heartbeat outranks the tab list**. An agent that ran a command seconds ago is alive regardless of what the tab list says — checking tabs first would call it dead whenever the tab was renamed, launched with `--no-tab`, or started outside Orca. The tab check only downgrades an agent that has *not* checked in recently.
@@ -170,7 +171,11 @@ The cursor answers "has this been handed over", which stops being the right ques
 - a `wait` killed mid-print, as above;
 - an agent that was given a message and ended its turn without replying — the cursor is past it, so nothing will ever show it again.
 
-Either way the message is gone until another agent notices the silence and pings. So `wait` also asks a cursor-free question every poll: *is anything addressed to me, after my own last message, still unanswered?* — `pending_for`, the same check the Stop hook uses, bounded below by the floor. Anything older than `REDELIVER_AFTER` (45s) comes back marked **re-delivered**, and a reply is what clears it.
+Either way the message is gone until another agent notices the silence and pings. So `wait` also asks a cursor-free question every poll: *is anything addressed to me still unanswered?* — `pending_for`, the same check the Stop hook uses, bounded below by the floor.
+
+That question is asked **per sender**, not against one "since I last spoke" line. With three agents talking, a global line means a reply to `p1` also discharges the debt to `p3`, so a message that arrived alongside another and was never answered becomes invisible to every later check — permanently. What answers a sender is a message **to that sender**, or one to `@all`; `pending` lists what is owed and to whom. Anything older than `REDELIVER_AFTER` (45s) comes back marked **re-delivered**, and a reply is what clears it.
+
+The cursor only ever moves **forward**. A `read` in one process and a `wait` in another each hold an offset captured at a different moment, and letting the older one win would rewind the cursor and re-deliver a stretch that was already answered.
 
 Three things keep that from becoming noise:
 
@@ -209,6 +214,23 @@ Three changes make the loop survive that:
 - **`wait` announces itself before blocking**, flushed, so a killed call still prints the line telling the agent that a short return is the cap expiring and to run `wait` again. The output an agent gets from a truncated command is now instructions rather than silence.
 - **Every briefing states the rule, whatever the agent is running:** an early or empty `wait` is the tool's cap, so raise the timeout if the tool takes one and re-run it either way. A *specific* cap is an accelerator on top, and it travels with the rest of that CLI's launch facts — `wait_note` in a recipe or in the user's own `providers.json`, returned by `resolve_provider` like `install` or `efforts`. A CLI nobody has measured is still fully briefed by the rule.
 - **The default dropped from 120s to 90s**, since a default sitting exactly on a known cap turned every normal wait into a tool error. 90s still stamps a heartbeat well inside the 360s liveness window.
+
+### One wait consumes at a time
+
+Two `wait` processes for the same agent split its inbox: each message is returned by whichever polls first, and a message handed to a wait whose output nobody reads is a message that was consumed and never answered. It is the same loss as a killed wait, arriving by a different route.
+
+Worse, duplicates used to be *manufactured* here. The marker was removed in the wait's `finally` block, so the **first** wait to return deleted it while a second was still polling — after which `is_listening` said nothing was listening, and the Stop hook and `state` both told the agent to fix that by starting a wait. One extra wait bred the next.
+
+So ownership is explicit:
+
+- `<id>/waiting` holds a **token, pid, deadline and heartbeat**, refreshed every poll by whoever owns it.
+- A `wait` that finds a live marker belonging to somebody else **idles** — it polls without reading, consumes nothing, and reports "another `wait` was already listening" when its own timeout expires. It idles rather than exiting because an immediate exit hands control straight back to the agent, which arms another wait, which exits immediately, and so on.
+- If the owner stops refreshing (killed, or its process died), the idling wait **takes over** within a cycle or two. Nothing waits out a deadline that will never arrive.
+- Only the owner clears the marker on the way out.
+
+`read` prints which state the caller is in — *a wait is already in flight for you*, or *no wait is in flight for you* — because "have I already armed one?" was previously unanswerable except by guessing, and guessing wrong is what produced a second one.
+
+The session agent keeps a short grace on top: it backgrounds its `wait`, so a Stop firing immediately afterwards can beat the new process to writing its marker. That grace is `MARKER_STALE` (15s) — long enough for an interpreter to start, short enough that a session agent which ran a command minutes ago and never armed a wait is correctly reported as deaf. It used to be the 360s liveness window, which swallowed exactly that case.
 
 ### Waking an agent that stopped listening
 

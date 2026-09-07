@@ -3,7 +3,7 @@ name: partner
 description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
 argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | stop"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch, Skill
-version: 0.17.0
+version: 0.18.0
 ---
 
 # Partner
@@ -201,7 +201,9 @@ The second must be **backgrounded** (the Bash tool with `run_in_background: true
 
 **A `wait` that returns early or empty is never a reason to stop.** Every agent CLI caps how long one command may run — the two measured here differ by more than tenfold — so a capped `wait` comes back with nothing, and an agent reading that as a broken command leaves the loop for good. Every briefing states the rule for whatever CLI the agent is running, plus that CLI's specific cap when one is known (`references/providers.md`); either way, run `wait` again.
 
-**Nothing is delivered once and forgotten.** `wait` checks the transcript for anything addressed to an agent and still unanswered, not only what its cursor has not seen — so a message dropped by a killed `wait` or by a turn that ended without replying comes back marked *re-delivered* instead of needing another agent to notice. Answering is what clears it; `pending` shows what is owed.
+**Nothing is delivered once and forgotten.** `wait` checks the transcript for anything addressed to an agent and still unanswered, not only what its cursor has not seen — so a message dropped by a killed `wait` or by a turn that ended without replying comes back marked *re-delivered* instead of needing another agent to notice. What clears a debt is a reply to that sender (or one to `@all`); `pending` shows what is owed and to whom.
+
+**Keep exactly one `wait` in flight.** Two split the inbox — each message is returned to whichever polls first, and one whose output is never read is a message never answered. A duplicate now idles instead of consuming and says so, ownership transfers if the owner dies, and `read` states whether a wait is already in flight for you. Check that line before arming another.
 
 ### When a partner goes quiet
 

@@ -63,6 +63,11 @@ CLAIM_GRACE = 90
 # cycle rather than a partner noticing the silence.
 REDELIVER_AFTER = 45
 REDELIVER_WINDOW = 90      # seconds between re-deliveries of the same backlog
+# A polling `wait` refreshes its marker every cycle, so "is anyone listening"
+# is answered by a heartbeat rather than by the marker merely existing: a wait
+# that was killed stops refreshing, and another can take over within a cycle
+# or two instead of waiting out a deadline that will never arrive.
+MARKER_STALE = 15
 
 
 # --------------------------------------------------------------------------
@@ -350,12 +355,24 @@ def read_new(sd: Path, who: str) -> tuple[list[dict], int]:
 
 
 def commit_cursor(sd: Path, who: str, end: int) -> None:
-    """Mark everything up to `end` as delivered. Called only after the messages
-    have actually been written out."""
+    """Mark everything up to `end` as delivered, and never un-mark anything.
+
+    Only ever forward: a `read` in one process and a `wait` in another can each
+    hold an offset from a different moment, and letting the older one win would
+    rewind the cursor and re-deliver a stretch of transcript that was already
+    answered.
+    """
     try:
         cur_f = sd / who / "cursor"
         cur_f.parent.mkdir(parents=True, exist_ok=True)
-        cur_f.write_text(str(end), encoding="utf-8")
+        have = 0
+        if cur_f.exists():
+            try:
+                have = int(cur_f.read_text(encoding="utf-8").strip() or 0)
+            except ValueError:
+                have = 0
+        if end > have:
+            cur_f.write_text(str(end), encoding="utf-8")
     except OSError:
         pass
 
@@ -408,10 +425,24 @@ def pending_for(sd: Path, roster: dict, who: str) -> list[dict]:
     # before it joined is briefing material, not mail it owes a reply to.
     text = raw[_offset(sd, who, "floor", len(raw)):].decode("utf-8", errors="replace")
     convo = [m for m in parse_msgs(text) if m["from"] != "system"]
-    my_last = max((i for i, m in enumerate(convo) if m["from"] == who), default=-1)
+    # Per sender, not one global "since I last spoke" line. With three agents
+    # talking, a reply to p1 would otherwise clear the debt to p3 as well -- so
+    # a message that arrived alongside another and was never answered became
+    # invisible to every later check. What answers a sender is a message TO
+    # that sender, or to @all.
+    answered_at: dict[str, int] = {}
+    for i, m in enumerate(convo):
+        if m["from"] != who:
+            continue
+        if m["to"] in ("@all", "all"):
+            for s in {x["from"] for x in convo if x["from"] != who}:
+                answered_at[s] = i
+            answered_at["@all"] = i
+        else:
+            answered_at[m["to"]] = i
     return [m for i, m in enumerate(convo)
-            if i > my_last and m["from"] != who
-            and m["to"] in (who, "@all", "all")]
+            if m["from"] != who and m["to"] in (who, "@all", "all")
+            and i > answered_at.get(m["from"], answered_at.get("@all", -1))]
 
 
 def dropped_for(sd: Path, roster: dict, who: str,
@@ -450,6 +481,38 @@ def baton_banner(roster: dict, who: str) -> str:
             f"If the human just told YOU to make a change, run `claim` first.]")
 
 
+def read_marker(sd: Path, who: str) -> dict:
+    """Who is polling for this agent, and when they last proved it."""
+    try:
+        raw = (sd / who / "waiting").read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        # A marker written by an older version: a bare deadline, no heartbeat.
+        try:
+            return {"token": "", "deadline": float(raw), "beat": time.time()}
+        except ValueError:
+            return {}
+
+
+def marker_live(mark: dict) -> bool:
+    beat = mark.get("beat") or 0
+    return bool(mark) and (time.time() - beat) < MARKER_STALE
+
+
+def write_marker(sd: Path, who: str, token: str, deadline: float) -> None:
+    try:
+        d = sd / who
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "waiting").write_text(json.dumps(
+            {"token": token, "pid": os.getpid(), "deadline": deadline,
+             "beat": time.time()}), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def cmd_wait(args) -> int:
     """Block until somebody addresses this agent.
 
@@ -472,17 +535,43 @@ def cmd_wait(args) -> int:
               f"is cut short by your tool's own timeout, that is the timeout, "
               f"not an answer -- run `wait` again immediately. Never end your "
               f"turn without a wait in flight.]", flush=True)
-    # Hold <id>/waiting for as long as we poll, stamped with our own deadline.
-    # This is what lets the Stop hook tell "listening right now" from "ran some
-    # command recently" -- every other command touches lastseen too.
-    mark = sd / who / "waiting"
-    try:
-        mark.parent.mkdir(parents=True, exist_ok=True)
-        mark.write_text(str(deadline), encoding="utf-8")
-    except OSError:
-        pass
+    # <id>/waiting says who is polling for this agent. Only that one consumes
+    # messages; a second `wait` for the same agent idles instead, because two
+    # of them split the inbox -- each message goes to whichever polls first, and
+    # the one whose output nobody reads takes its message with it.
+    #
+    # Duplicates are not hypothetical: they used to be manufactured here. The
+    # marker was deleted by whichever wait finished first, so a second one still
+    # polling looked like nothing listening at all -- which is exactly what the
+    # Stop hook and `state` tell an agent to fix by starting another wait.
+    #
+    # So ownership is a token with a heartbeat, and a duplicate blocks quietly
+    # rather than exiting: exiting immediately would return control to the agent,
+    # which arms another wait, which exits immediately...
+    token = f"{os.getpid()}-{time.time():.3f}"
+    owner = False
     try:
         while True:
+            mark = read_marker(sd, who)
+            if mark.get("token") == token:
+                owner = True
+            elif marker_live(mark):
+                owner = False            # somebody else is consuming; idle
+            else:
+                # Free, or the previous owner stopped proving it was alive.
+                write_marker(sd, who, token, deadline)
+                owner = True
+            if not owner:
+                if time.time() >= deadline:
+                    emit(args, {"messages": [], "duplicate": True},
+                         f"(another `wait` for {who} was already listening, so "
+                         f"this one stayed out of the way -- keep exactly ONE "
+                         f"in flight; a second splits the inbox and messages "
+                         f"get read by whichever polls first)")
+                    return 0
+                time.sleep(args.poll)
+                continue
+            write_marker(sd, who, token, deadline)   # heartbeat
             touch_seen(sd, who)          # still here, still listening
             msgs, end = read_new(sd, who)
             if msgs:
@@ -534,8 +623,11 @@ def cmd_wait(args) -> int:
                 return 0
             time.sleep(args.poll)
     finally:
+        # Only the owner clears the marker. Clearing somebody else's is what
+        # made a live listener look dead and started the whole cycle.
         try:
-            mark.unlink()
+            if read_marker(sd, who).get("token") == token:
+                (sd / who / "waiting").unlink()
         except OSError:
             pass
 
@@ -2505,9 +2597,12 @@ trigger you to answer it yourself.
 `wait` checks the whole transcript, not only what you have not seen yet: a
 message addressed to you that you never answered comes back marked
 **re-delivered**. That means you were given it and dropped it -- a reply is what
-clears it, even a one-line "AGREED" or "already settled". Nothing you have
-replied to is ever re-delivered, so seeing one is information: you lost a turn
-somewhere.
+clears it, even a one-line "AGREED" or "already settled". Seeing one is
+information: you lost a turn somewhere.
+
+What clears a debt is a reply to *that agent*. Answering p1 does not answer p3 --
+one message to `@all` answers everyone, a message to one agent answers only
+them. `{run} pending` lists exactly what you still owe and to whom.
 
     See who is here and who holds the write baton:
         {run} list
@@ -2614,6 +2709,14 @@ every reply, every timeout, every answer to the human, run `wait` again. A tab
 that stops looping is dead to the others: nothing re-invokes you, so everything
 said after that point is said to nobody.
 
+**Exactly ONE `wait` at a time, and always in the foreground.** Never put it in
+the background, never with `&`, never two at once, never a second one "to be
+safe". Two waits split your inbox -- each message goes to whichever polls first,
+and the one whose output you do not read takes its message with it. A duplicate
+wait now says so and idles instead of consuming, so if you ever see "another
+`wait` was already listening", you started one too many: run a single foreground
+`wait` from then on.
+
 **About your `wait` calls:** {wait_note}
 
 1. `{run} wait`. Read the banner it prints: it names the baton holder. What you
@@ -2671,8 +2774,15 @@ terminal tab. That changes only *how you wait*, not the loop.
 Never run `wait` in the foreground -- it would block your harness and stop the
 human talking to you. Run it as a BACKGROUND shell command instead (the Bash
 tool with run_in_background: true). Claude Code re-invokes you when it returns --
-someone spoke, or it timed out. Keep exactly ONE background `wait` in flight and
-re-arm it at the end of every turn.
+someone spoke, or it timed out.
+
+**Exactly ONE background `wait`, ever.** Before arming another, check whether one
+is already running -- your own background task list, or `{run} pending` and the
+listener line `read` prints. A second wait splits your inbox: each message goes
+to whichever polls first, and the message handed to a wait you never read is a
+message you never answer. A duplicate now idles instead of consuming and tells
+you so -- if you see "another `wait` was already listening", do not arm any more
+this turn.
 
 **About your `wait` calls:** {wait_note}
 
@@ -3216,20 +3326,21 @@ def is_listening(sd: Path, roster: dict, who: str) -> bool:
     distinction is the whole point: an agent that has just replied and is about
     to stop looks busy by every other measure.
     """
-    mark = sd / who / "waiting"
-    try:
-        if mark.exists() and time.time() < float(
-                mark.read_text(encoding="utf-8").strip()) + 30:
-            return True
-    except (OSError, ValueError):
-        pass
-    # The session agent backgrounds its `wait`, so the marker write can race a
-    # Stop that fires immediately after. A lastseen inside the live window still
-    # proves something is polling on its behalf.
+    # A heartbeat, not the file's existence: a wait that was killed leaves the
+    # marker behind, and treating that as "listening" would let an agent go
+    # deaf silently.
+    if marker_live(read_marker(sd, who)):
+        return True
+    # The session agent backgrounds its `wait`, so a Stop firing immediately
+    # after can beat the new process to writing its marker. That race lasts as
+    # long as an interpreter takes to start -- so the grace is seconds, not the
+    # liveness window. At 360s it swallowed the real case: a session agent that
+    # ran any command five minutes ago and never armed a wait looked like it was
+    # listening, and nothing told it otherwise.
     entry = roster["partners"].get(who) or {}
     if (entry.get("kind") or "tab") == "session":
         age = _age_seconds(last_seen(sd, who))
-        return age is not None and age <= LIVE_WINDOW
+        return age is not None and age <= MARKER_STALE
     return False
 
 
@@ -3531,9 +3642,22 @@ def cmd_read(args) -> int:
     seen_ts = {m["ts"] for m in msgs}
     dropped = [m for m in dropped_for(sd, roster, who, min_age=0)
                if m["ts"] not in seen_ts]
+    # Whether a wait is already in flight for *this* agent, which is the one
+    # thing it needs to know before arming another: a second wait splits the
+    # inbox, and until now there was no way to check except guessing.
+    mine = read_marker(sd, who)
+    if marker_live(mine):
+        left = max(0, int((mine.get("deadline") or 0) - time.time()))
+        listening = (f"{NL * 2}[a `wait` is already in flight for you "
+                     f"(about {left}s left) -- do NOT start another; one is "
+                     f"what keeps the inbox undivided]")
+    else:
+        listening = (f"{NL * 2}[no `wait` is in flight for you -- start one "
+                     f"before this turn ends, or you stop hearing the debate]")
     if args.json:
         print(json.dumps({"baton": baton_of(roster), "you": who,
-                          "messages": msgs, "unanswered": dropped}, indent=2))
+                          "messages": msgs, "unanswered": dropped,
+                          "listening": marker_live(mine)}, indent=2))
     else:
         body = render(msgs) or "(nothing new)"
         if dropped:
@@ -3541,7 +3665,7 @@ def cmd_read(args) -> int:
                      f"{render(dropped)}{NL * 2}"
                      f"[you were given these before and have not replied. "
                      f"Answering with `send` is what clears them.]")
-        print(baton_banner(roster, who) + NL * 2 + body
+        print(baton_banner(roster, who) + NL * 2 + body + listening
               + silence_notice(sd, roster, who))
     sys.stdout.flush()
     if not args.peek:

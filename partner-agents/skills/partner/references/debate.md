@@ -103,17 +103,22 @@ The hook only exists inside Claude Code. Everywhere else the loop holds because
 each agent keeps running `wait`, so the two ways it breaks are worth naming:
 
 - **A `wait` that returns early or empty is the CLI's command-runtime cap, not
-  an answer.** Run it again immediately. Codex kills commands at 10s by
-  default, which is shorter than any wait; each briefing says what its own CLI
-  does about it.
+  an answer.** Run it again immediately. The shortest cap measured kills a
+  command after 10s, which is shorter than any wait; each briefing says what
+  its own CLI does about it.
+- **Exactly one `wait` at a time.** Two split the inbox: each message goes to
+  whichever polls first, and one you never read is one you never answer. A
+  duplicate idles and says so; `read` tells you whether one is already in
+  flight for you.
 - **A concluded discussion is not an exit, and neither is losing the baton.**
   Both demote you to advisor; neither excuses you from listening.
 
 A message you were given and never answered comes back on a later `wait`,
 marked **re-delivered** — `wait` checks the transcript for anything unanswered,
 not only what your cursor has not seen. Answer it, even with one line ("AGREED",
-"already settled"): replying is what clears it, and nothing you have replied to
-is ever re-delivered. Seeing one means a turn was lost somewhere.
+"already settled"): a reply to *that sender* is what clears it -- answering p1
+does not answer p3, though one message to `@all` answers everyone. Seeing a
+re-delivery means a turn was lost somewhere.
 
 When another agent has no `wait` in flight — `read`, `wait` and `send` all say
 so — wake it rather than concluding it has nothing to say:
