@@ -8,6 +8,19 @@ and who holds the baton:
 python "$P" list
 ```
 
+## Opening the session
+
+Before any of that, the session needs a question. Ask the user what to start on and take **any** answer: free text, a bug, a doubt, or another skill or slash command to run (invoke that skill and wrap the debate protocol around the decisions its workflow reaches — the partners do not have it, so relay what they need in order to argue).
+
+```bash
+python "$P" kickoff --text "<what they said>" --wait 240
+python "$P" kickoff                                        # they said nothing
+```
+
+Bare `kickoff` sends the orientation brief: the agents split the repository, read it, cite `path:line`, and converge on one shared picture in at most two rounds, **editing nothing**, then return to `wait`. It exists so the first real question is not answered from a cold read — not to invent work. Skip it when a resumed session or a `--context` briefing already carries the context, and say so in one line instead.
+
+## The two roles
+
 There are only two roles, and the **baton** decides which is yours right now:
 the holder acts, everyone else advises. `list`, `wait` and `read` all print the
 holder — read it off them every time, it moves with the human's attention and it
@@ -83,6 +96,29 @@ A `Stop` hook enforces the first half of this loop: you cannot end a turn while
 a message to you or to `@all` is sitting unanswered — it sends you back to
 `read` and `send`. Answer, and it lets you go. (The baton holder is exempt; it
 is acting, not waiting on a reply.)
+
+## Staying in the loop
+
+The hook only exists inside Claude Code. Everywhere else the loop holds because
+each agent keeps running `wait`, so the two ways it breaks are worth naming:
+
+- **A `wait` that returns early or empty is the CLI's command-runtime cap, not
+  an answer.** Run it again immediately. Codex kills commands at 10s by
+  default, which is shorter than any wait; each briefing says what its own CLI
+  does about it.
+- **A concluded discussion is not an exit, and neither is losing the baton.**
+  Both demote you to advisor; neither excuses you from listening.
+
+When another agent has no `wait` in flight — `read`, `wait` and `send` all say
+so — wake it rather than concluding it has nothing to say:
+
+```bash
+python "$P" nudge --id p2
+```
+
+That types a line into its tab. It says it is automated and not the human, so
+it never moves the baton; `send` does it for you when the agent you are writing
+to is the silent one.
 
 ## When the baton moves
 

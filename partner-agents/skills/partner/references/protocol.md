@@ -52,8 +52,12 @@ The distinction each agent is briefed on:
 |-----------------------------|------------|
 | The human, typing in this agent's tab | `claim`, then act |
 | Another agent, via `wait` | do not claim, do not edit — argue and propose |
+| Its own launch prompt | do not claim — `spawn` started it; the boot line says so |
+| An automated wake-up typed into its tab | do not claim — another agent noticed its silence |
 
-That second row is the load-bearing one. Without it, one agent could tell another to make a change and the baton would drift away from the human entirely.
+The second row is the load-bearing one: without it, one agent could tell another to make a change and the baton would drift away from the human entirely.
+
+Rows three and four exist because both messages arrive through the same channel as the human's typing and are indistinguishable from it by construction — a terminal tab has one input. Text is therefore the only defence available, and it is applied at both ends: the launch prompt and the wake-up line each open by disowning themselves, and every briefing names them as the two impostors. Because "is this the human?" is a judgement call, and a wrong answer silently takes write permission from whoever is working, shared state carries a guard too: `claim` refuses when the caller started less than `CLAIM_GRACE` (90s) ago and has never spoken in the transcript, and says to use `claim --force` if the human really did just address a brand-new partner. That combination is what turns an intermittent, invisible failure into a refusal with an explanation.
 
 Every `read` and `wait` prints the current holder as its first line, which puts the reminder exactly where it is needed — an agent reads its inbox immediately before deciding what to do about it. `baton --to <id>` remains for deliberate handover.
 
@@ -69,6 +73,8 @@ Because partners launch with permission prompting relaxed, this is a rule agents
 └── <id>/
     ├── p.cmd / p.sh   this agent's wrapper -- carries its PARTNER_ID
     ├── lastseen       heartbeat: when this agent last acted
+    ├── waiting        present only while a `wait` is actually polling
+    ├── .nudge         when this agent was last woken (throttle)
     ├── seed.md        the briefing this agent was launched with
     ├── handoff.md     what was decided before it joined
     ├── cursor         byte offset of the last message it consumed
@@ -162,11 +168,57 @@ There is no supervising process. Each agent is an ordinary interactive session t
 
 Any agent can run any of these, `spawn` included. `.partner/p.sh` (no id) is the shared wrapper, for a human at a shell.
 
-`wait` is what makes an interactive session autonomous. It polls the transcript and blocks until a message arrives for that agent, so the agent has something to answer rather than needing to be driven. It always returns within `--timeout` (default 120s) even when nothing arrives, which matters twice over: the tab never looks wedged, and the human can interrupt and type instead.
+`wait` is what makes an interactive session autonomous. It polls the transcript and blocks until a message arrives for that agent, so the agent has something to answer rather than needing to be driven. It always returns within `--timeout` (default 90s) even when nothing arrives, which matters twice over: the tab never looks wedged, and the human can interrupt and type instead.
+
+### Command-runtime caps, and why they end debates
+
+Every agent reaches `wait` through its own CLI's shell tool, and each of those caps how long a command may run. Codex's exec tool terminates at **10s** by default; Claude Code's Bash tool at **120s**. A wait longer than the cap is killed mid-poll, and — before this was handled — returned nothing at all. An agent reading an empty result from the command its entire loop depends on concludes the command is broken and ends its turn, which for a tab agent is permanent: nothing re-invokes it.
+
+Three changes make the loop survive that:
+
+- **`wait` announces itself before blocking**, flushed, so a killed call still prints the line telling the agent that a short return is the cap expiring and to run `wait` again. The output an agent gets from a truncated command is now instructions rather than silence.
+- **Each briefing carries its own CLI's cap.** A codex seed says to pass `timeout_ms`/`yield_time_ms` of 600000 on every wait call; a Claude seed says to stay under the 120s Bash timeout. `WAIT_NOTES` in `partner.py` holds them, with a generic note for any CLI without an entry.
+- **The default dropped from 120s to 90s**, since a default equal to Claude Code's Bash cap turned every normal wait into a tool error. 90s still stamps a heartbeat well inside the 360s liveness window.
+
+### Waking an agent that stopped listening
+
+A Stop hook only exists inside Claude Code. A codex or gemini tab that ends its turn is unreachable from inside the system, so the recovery comes from outside it: type into the tab, exactly as the human would.
+
+```bash
+.partner/p.sh nudge --id p2      # one agent
+.partner/p.sh nudge              # everyone with no `wait` in flight
+```
+
+`spawn` records how each tab was opened (`tab_kind`, `tab_handle`, `tab_title` on the roster entry) because the terminal that owns a tab is not recoverable afterwards. Orca tabs are typed into with `orca terminal send --terminal <handle> --text … --enter`; tmux, WezTerm and kitty have equivalents. A detached OS window (Windows Terminal, Terminal.app, GNOME Terminal) cannot be typed into, so `nudge` reports that and prints the command that restarts the agent instead.
+
+Where it fires:
+
+- **`send`** checks its recipients and wakes any that are not listening — the message that would otherwise vanish into a transcript nobody reads.
+- **`wait`**, on an idle timeout, wakes anyone silent: the cheapest moment to notice, since nothing is waiting on a reply.
+- **`read` and `wait`** name silent agents in their output, so an agent about to conclude that a partner has nothing to say learns that nobody was listening instead.
+
+Nudges are throttled through a marker in the *target's* directory (`<id>/.nudge`, 120s), so three agents noticing the same silence produce one wake-up between them. The text says it is automated and not the human, and tells the agent not to claim the baton — see "How the baton moves".
 
 The briefing tells each agent to loop — `wait`, think, `send`, repeat — and what it does on each pass turns on whether it holds the baton. The holder runs the debate and makes the change (state a position, `send --to @all --wait`, weigh the replies, act). Everyone else advises — and not only in reply to the holder: any non-holder can open a thread with any other, `send --to p3` as readily as `--to @all`, so three or four agents can work a question out among themselves and hand the holder a joint recommendation. The baton moves with the human's attention; each `wait` and `read` reprints the holder, and an agent switches roles the moment it changes.
 
 The one agent that does **not** block on `wait` is the session someone typed the skill into. It reaches the human through its own Claude Code harness, and a foreground block would stop them talking to it — so its briefing has it run `wait` as a **background** command instead. Claude Code re-invokes it when that returns (a partner spoke, or it timed out), which is what keeps it in the debate even while the human is working in another agent's tab. Without this it would sit idle any time the conversation moved to a tab — participating only when addressed in its own session. It keeps exactly one background `wait` in flight and re-arms it at the end of every turn. That is the only difference between any two agents here, and it comes from how the human reaches them, not from rank.
+
+## Opening the session
+
+A roster of briefed agents is not a debate. Everyone is blocked on `wait`, the transcript holds nothing but join notices, and nobody has been asked anything — so the session has to be opened deliberately:
+
+```bash
+.partner/p.sh kickoff --text "what the human wants worked on"
+.partner/p.sh kickoff                    # they have not said yet
+```
+
+Both send one message to `@all`, and both are canned text rather than improvised, so every agent receives the same protocol in the same words. An improvised "have a look around" produces a summary nobody asked for and an agent that then stops looping.
+
+**With `--text`**, the human's instruction is framed as the session's opening question, naming the sender as the baton holder: the others verify it against the code and argue, the holder acts.
+
+**Without**, it sends the orientation brief — the agents split the repository between them, read it, ground every claim at `path:line`, and hand each other one joint picture of what the project is and what to be careful with. Its constraints are the point: **nobody edits anything**, not even the baton holder; claims are split rather than duplicated; it converges in at most two rounds and everyone returns to `wait`. The goal is that the human's first real question is not answered from a cold read — not to fill the silence with work nobody asked for.
+
+Skip the orientation when the context is already there: a resumed session, or a `--context` briefing that already says what the work is. Re-reading the repo to restate it costs everyone a round.
 
 ## What an agent is launched with
 
@@ -227,7 +279,9 @@ That is the right place for the rule. A deadlock between two models is a genuine
 
 **The baton drifting away from the human.** An agent claimed after being asked by another agent rather than by the human. Its briefing forbids this; check the transcript for the `system` message naming who claimed and when.
 
-**An agent that stopped looping.** Interactive agents sometimes end their turn rather than running `wait` again. Type "continue" in its tab, or `send` it a message.
+**An agent that stopped looping.** Interactive agents sometimes end their turn rather than running `wait` again — most often because their CLI's command-runtime cap cut a `wait` short (see above), or right after a discussion concluded. `nudge --id <id>` types a wake-up into its tab; `send` does it automatically for a recipient that is not listening.
+
+**A partner that claimed the baton the moment it started.** It read its own launch prompt as the human addressing it. The boot line disowns itself, the briefing names it, and `claim` refuses inside the launch grace window — if it still happened, `baton --to <id>` puts it back and the transcript names who claimed.
 
 **Interleaved writes.** Appends are single `open(..., "a")` writes, atomic at these sizes on all three platforms. Two agents replying in the same instant produce two well-formed adjacent records, not a corrupted one.
 

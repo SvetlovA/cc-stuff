@@ -6,7 +6,7 @@ A public collection of Claude Code plugins for developer workflows. Install any 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 0.13.0 |
+| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 0.14.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.6.1 |
 
 ## Installing a Plugin
@@ -39,7 +39,9 @@ Runs several AI agents as equal partners, each in its own terminal tab, so decis
 - Opens partners as **Orca tabs** in the current worktree when running inside Orca, and falls back to the platform terminal everywhere else
 - **Validates before spawning**: CLI installed and runnable, effort level accepted by that provider, model recognised — each failure reported with its fix
 - Passes a **handoff briefing** so the partner joins mid-work already knowing what was decided and what is open
+- **Asks what to start on once the partners are up** — any text, or another slash command to run through the debate; say nothing and the agents spend one round reading the repository and agreeing on what it is, editing nothing, before waiting for you
 - Puts **every question and decision** to the partners, weighs the pushback against the code, and reports the disagreement instead of hiding it
+- **Keeps partners in the loop** — each is briefed on its own CLI's command-runtime cap (codex kills a command after 10s, which used to end its wait loop for good), and any agent that stops listening gets a wake-up typed into its tab (Orca, tmux, WezTerm, kitty)
 - Keeps a **write baton** that follows your attention: type into a tab and that agent claims it, so only the partner you just spoke to edits files — one partner telling another to change something does not move it
 - Runs **as many partners as you want**, all debating in one shared `.partner/chat.md` transcript
 

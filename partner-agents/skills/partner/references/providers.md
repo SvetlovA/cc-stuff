@@ -205,6 +205,23 @@ The file is optional in every sense — it exists so a CLI used often does not h
 
 Run shell commands. That is how it calls `wait` and `send`. A CLI that cannot run commands can read the transcript but cannot take part in the debate.
 
+## Command-runtime caps
+
+Every CLI limits how long one shell command may run, and `wait` is a long-running command by design — so the cap decides whether an agent can stay in the loop at all. A wait longer than the cap is killed mid-poll and returns nothing, which reads as a broken command; the agent then ends its turn and, having no Stop hook outside Claude Code, is never re-invoked.
+
+| CLI | Default cap | What its briefing says |
+|-----|-------------|------------------------|
+| `codex` | **10s** (`yield_time_ms` on the exec tool) | pass `timeout_ms`/`yield_time_ms` of 600000 on every wait call, or the `// @exec: {"yield_time_ms": 600000}` pragma in code mode; an early return is the cap, so run `wait` again |
+| `claude` | 120s (Bash tool), 600s max | keep `wait` under it — its own default is 90s — or pass a longer tool timeout |
+| `gemini` | not documented | treat an early return as the cap and run `wait` again |
+| anything else | unknown | the generic note: an early or empty return is the cap, not an answer |
+
+`WAIT_NOTES` in `partner.py` holds these, keyed by provider name, and `wait_note()` falls back to the generic text for a CLI with no entry. Add an entry when a CLI's cap is known — it goes straight into that provider's briefings.
+
+`wait`'s own default is 90s for the same reason: at 120s it sat exactly on Claude Code's Bash cap, turning every normal wait into a tool error.
+
+A cap is only half the problem — the other half is that nothing re-invokes a tab agent that ends its turn. Inside Claude Code the `Stop` hook catches that; elsewhere the recovery is a nudge typed into the tab (`references/terminals.md`). Codex 0.153 does implement a Claude-Code-shaped hooks system of its own, including a `Stop` event, but its hooks require a persisted trust hash or `--dangerously-bypass-hook-trust`, so wiring one from here would risk a trust prompt blocking the very startup it is meant to protect. Worth revisiting once that surface is documented.
+
 ## Adding a recipe
 
 Worth doing only for a CLI whose flags the probe gets wrong. Add a builder and one entry in `scripts/partner.py`:

@@ -2,8 +2,8 @@
 name: partner
 description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
 argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | stop"
-allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch
-version: 0.13.0
+allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch, Skill
+version: 0.14.0
 ---
 
 # Partner
@@ -39,6 +39,8 @@ python "$P" claim
 Then do the work. Skipping this means a partner still believes it holds the baton and may edit the same files you are editing.
 
 The half that is easy to get wrong: a message from **another agent** never moves the baton. A partner saying "you should change X" is a suggestion, not the user's instruction — argue it, and if the group agrees, the change is still only yours to make if you hold the baton.
+
+Two things land where the user's typing lands and are **not** the user: a partner's own **launch message** and an automated **wake-up**. Both disown themselves in their own first line, neither moves the baton, and `claim` refuses an agent that started seconds ago and has not spoken yet (`claim --force` for when the user genuinely did just address a brand-new partner). Without that, a fresh partner intermittently reads its own boot prompt as an instruction and takes write permission from whoever is working.
 
 `read` and `wait` print the current holder on every call — believe that line over your memory of it. `python "$P" baton --to p2` hands it over deliberately.
 
@@ -88,7 +90,7 @@ python "$P" resume --session 20260905-185718     # bring an archived one back
 
 ## Starting a partner
 
-**The job is not done until a partner is running in a tab.** Registering yourself, checking a provider, asking which model — all steps *towards* that, never the result. Stop at any of them and the user has an empty roster. Finish with `list` showing at least two running agents.
+**The job is not done until a partner is running in a tab and the session has something to argue about.** Registering yourself, checking a provider, asking which model — all steps *towards* that, never the result. Stop at any of them and the user has an empty roster. Finish with `list` showing at least two running agents, a `kickoff` in the transcript, and a background `wait` armed.
 
 ### Step 1 — Settle the configuration
 
@@ -158,7 +160,24 @@ The tab runs the provider's normal interface on a briefing that tells it to loop
 
 Confirm with `python "$P" list` before reporting success. Two or more agents means it worked; only yourself means the spawn never happened — say that plainly rather than describing what was set up.
 
-### Step 4 — Enter the loop yourself, before ending the turn
+### Step 4 — Ask what to start on, then open the session
+
+A briefed roster is not yet a debate: everyone is blocked on `wait` and nobody has been asked anything. So ask, with `AskUserQuestion`, and **accept anything as the answer**:
+
+- **Free text** — a task, a question, a bug, a half-formed doubt. It becomes the opening instruction, verbatim.
+- **Another skill or slash command** — `/brainstorm`, `/planning:make`, a project skill. Invoke it and run *its* workflow, with the debate protocol wrapped around the decisions it reaches; the partners do not have that skill, so relay what they need in order to argue with it.
+- **Nothing** — they skip, or say "not yet".
+
+Then open the session, so every agent gets the same words:
+
+```bash
+python "$P" kickoff --text "<what the user said>" --wait 240   # claim the baton first
+python "$P" kickoff                                            # they gave you nothing
+```
+
+Bare `kickoff` sends the **orientation brief**: the agents split this repository between them, read it, cite `path:line`, and converge on one shared picture in at most two rounds, **editing nothing**, then return to `wait` — so the first real question is not answered from a cold read. Skip it and just wait when the context is already there (a resumed session, a `--context` briefing that says what the work is) or when the user asked to be left alone; say which in one line. Details: `references/debate.md`.
+
+### Step 5 — Enter the loop yourself, before ending the turn
 
 **Spawning a partner is not the end of the task.** The partner blocks on `wait` in its tab, so it hears everything. This session does not block, and nothing re-invokes it on its own — so unless it arms a listener now, it drops out of the debate the moment the user starts typing in the partner's tab, and the partner argues with nobody.
 
@@ -172,6 +191,18 @@ python "$P" wait --timeout 600       # 2. run this as a BACKGROUND command
 The second must be **backgrounded** (the Bash tool with `run_in_background: true`) — in the foreground it blocks the harness and the user cannot talk to this session. Claude Code re-invokes this session when it returns, which is the whole mechanism: one background `wait` in flight, re-armed at the end of every turn thereafter.
 
 `.partner/<id>/lastseen` is the proof it is running — the stamp refreshes every few seconds while `wait` polls. Missing or minutes old means this session is deaf, whatever the roster claims.
+
+**A `wait` that returns early or empty is never a reason to stop.** Every CLI caps command runtime — codex's exec tool at 10s, Claude Code's Bash tool at 120s — so a capped `wait` comes back with nothing, and an agent reading that as a broken command leaves the loop for good. Each briefing carries its own CLI's cap (`references/providers.md`); run `wait` again.
+
+### When a partner goes quiet
+
+A tab agent whose CLI ended its turn is unreachable — nothing re-invokes it, and only Claude Code has the Stop hook. `read`, `wait` and `send` name any agent with no `wait` in flight, and the fix is to type into its tab:
+
+```bash
+python "$P" nudge [--id p2]        # one, or everyone who stopped listening
+```
+
+`send` does it automatically for a recipient that is not listening, so a message to a stalled partner wakes it instead of vanishing. A detached OS window cannot be typed into — `nudge` says so and prints the command that restarts the agent, which is what to relay. Wake-ups never move the baton. `references/terminals.md`.
 
 ## The debate protocol
 
@@ -208,12 +239,14 @@ python "$P" spawn --provider X [--model M] [--effort low|medium|high|max]
                   [--force]                 # accept a model the list does not know
                   [--me-provider X --me-model M --me-effort E]   # describes YOU
                   [--fresh]                 # archive the old session first
+python "$P" kickoff [--text "..."] [--wait 240]   # open the session; no --text = orientation
 python "$P" send --to @all --text "..." [--wait 240]   # --from defaults to you
 python "$P" read [--peek]                   # new messages; --peek keeps the cursor
-python "$P" wait [--for id] [--timeout 120] # block until addressed; partners use this
+python "$P" wait [--for id] [--timeout 90]  # block until addressed; partners use this
+python "$P" nudge [--id p2 | --all]         # wake agents that stopped looping
 python "$P" pending                         # messages you still owe a reply to
 python "$P" hook-stop                        # internal: the Stop-hook backstop
-python "$P" claim                           # user just told YOU to act: take the baton
+python "$P" claim [--force]                 # user just told YOU to act: take the baton
 python "$P" init --me-provider X --me-model M [--me-effort E] [--me-auto A]
                                             # rarely needed; spawn does this
 python "$P" baton [--to p2]                 # show, or hand over deliberately

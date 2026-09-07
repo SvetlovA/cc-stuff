@@ -43,7 +43,19 @@ from pathlib import Path
 NL = chr(10)
 MSG_DELIM = "<!--/msg-->"
 WAIT_POLL = 3.0
-WAIT_TIMEOUT = 120
+# Every agent runs `wait` through its CLI's own shell tool, and those tools cap
+# how long a command may run: Claude Code's Bash tool defaults to 120s, codex's
+# exec tool to 10s. A default at or above a cap turns every normal wait into a
+# tool error, which is what teaches an agent that the command is broken. 90s
+# sits under the common cap and still stamps a heartbeat well inside
+# LIVE_WINDOW.
+WAIT_TIMEOUT = 90
+NUDGE_WINDOW = 120         # seconds between nudges to the same silent agent
+# How long after launch a claim is treated as the agent misreading its own boot
+# prompt for a human instruction. Long enough to cover reading the briefing and
+# reaching the first `wait`; short enough that a human typing at a new partner
+# is rarely caught by it, and `claim --force` covers them when they are.
+CLAIM_GRACE = 90
 
 
 # --------------------------------------------------------------------------
@@ -376,8 +388,19 @@ def cmd_wait(args) -> int:
     the tab never looks wedged and the human can interrupt and type instead.
     """
     sd = state_dir()
-    who = args.who or me_id(load_roster(sd))
+    roster = load_roster(sd)
+    who = args.who or me_id(roster)
     deadline = time.time() + args.timeout
+    # Say what this command is doing *before* blocking, and flush it. Every CLI
+    # caps how long a shell command may run -- codex at 10s by default -- and a
+    # capped wait that has printed nothing looks to the agent like a command
+    # that does not work, which is how partners talk themselves out of the loop.
+    # One flushed line means even a killed wait carries its own instructions.
+    if not args.json:
+        print(f"[listening as {who} for up to {args.timeout}s. If this command "
+              f"is cut short by your tool's own timeout, that is the timeout, "
+              f"not an answer -- run `wait` again immediately. Never end your "
+              f"turn without a wait in flight.]", flush=True)
     # Hold <id>/waiting for as long as we poll, stamped with our own deadline.
     # This is what lets the Stop hook tell "listening right now" from "ran some
     # command recently" -- every other command touches lastseen too.
@@ -397,12 +420,18 @@ def cmd_wait(args) -> int:
                     print(json.dumps({"baton": baton_of(roster), "you": who,
                                       "messages": msgs}, indent=2))
                 else:
-                    print(baton_banner(roster, who) + NL * 2 + render(msgs))
+                    print(baton_banner(roster, who) + NL * 2 + render(msgs)
+                          + silence_notice(sd, roster, who))
                 return 0
             if time.time() >= deadline:
+                # An idle cycle is the cheapest moment to notice that somebody
+                # else went deaf, and the only routine one -- nobody is waiting
+                # on a reply here.
+                roster = load_roster(sd)
+                notice = silence_notice(sd, roster, who, wake=True)
                 emit(args, {"messages": []},
                      f"(nothing addressed to {who} in {args.timeout}s "
-                     f"-- run wait again to keep listening)")
+                     f"-- run wait again to keep listening){notice}")
                 return 0
             time.sleep(args.poll)
     finally:
@@ -410,6 +439,29 @@ def cmd_wait(args) -> int:
             mark.unlink()
         except OSError:
             pass
+
+
+def silence_notice(sd: Path, roster: dict, who: str, wake: bool = False) -> str:
+    """One line about agents nothing is listening for, optionally waking them.
+
+    Delivered through `wait` and `read` because that is where every agent looks
+    constantly -- a partner that has gone deaf is otherwise invisible until
+    somebody notices their question was never answered.
+    """
+    silent = silent_agents(sd, roster, who)
+    if not silent:
+        return ""
+    if wake:
+        woke = [r["id"] for r in
+                (nudge_agent(sd, roster, p,
+                             "you stopped looping -- nobody is listening for you.")
+                 for p in silent) if r["nudged"]]
+        if woke:
+            return (f"{NL * 2}[{', '.join(woke)} had stopped listening; a wake-up "
+                    f"was typed into their tabs.]")
+    verb = "is" if len(silent) == 1 else "are"
+    return (f"{NL * 2}[{', '.join(silent)} {verb} not listening -- no `wait` is "
+            f"in flight. `nudge --id <id>` types a wake-up into the tab.]")
 
 
 def cmd_claim(args) -> int:
@@ -427,12 +479,36 @@ def cmd_claim(args) -> int:
         known = ", ".join(roster["partners"]) or "none"
         emit(args, {"error": "unknown"}, f"no agent named {who}; known: {known}")
         return 1
-    touch_seen(sd, who)
     prev = baton_of(roster)
     if prev == who:
+        touch_seen(sd, who)
         emit(args, {"baton": who, "changed": False},
              f"baton: already yours ({who}) -- go ahead")
         return 0
+
+    # A claim from an agent that has just been launched and has never spoken is
+    # almost always its own launch message being read as a human instruction:
+    # the prompt lands where the human's typing lands, and the briefing says a
+    # human addressing you means claim. It is intermittent -- a judgement call
+    # each model makes differently -- and the cost is silent, so the guard is
+    # here in shared state rather than only in the briefing. The human really
+    # can address a partner seconds after it starts, so this refuses once and
+    # says how to proceed rather than deciding it knows better.
+    if not args.force:
+        entry = roster["partners"][who]
+        age = _age_seconds(entry.get("started"))
+        spoke = any(m["from"] == who for m in tail_msgs(sd, 200))
+        if age is not None and age < CLAIM_GRACE and not spoke:
+            touch_seen(sd, who)
+            emit(args, {"baton": prev, "changed": False, "refused": "launch"},
+                 f"claim refused: you started {int(age)}s ago and have not "
+                 f"spoken yet, so this is almost certainly your own launch "
+                 f"message rather than the human. The baton stays with {prev}. "
+                 f"Go to `wait` and take part as an advisor. If the human "
+                 f"really did just type an instruction to you, run "
+                 f"`claim --force`.")
+            return 0
+    touch_seen(sd, who)
     roster["baton"] = who
     save_roster(sd, roster)
     append_msg(sd, "system", "@all",
@@ -470,6 +546,40 @@ EFFORT_HINT = {
 }
 
 AUTO_LEVELS = ("ask", "edits", "full")
+
+# Every agent reaches `wait` through its CLI's own shell tool, and each of those
+# caps command runtime. When the cap is shorter than the wait, the call comes
+# back early -- often with no output at all -- and an agent reading that as a
+# broken command stops looping and goes deaf, which is the single most common
+# way a partner drops out of the debate. So each briefing carries the cap its
+# own CLI imposes and what to do about it.
+GENERIC_WAIT_NOTE = (
+    "If your shell tool caps how long a command may run, `wait` will come back "
+    "early -- sometimes with no output at all. That is the cap, not a failure "
+    "and not an answer: run `wait` again immediately. Raise the tool's own "
+    "timeout for it if you can.")
+
+WAIT_NOTES = {
+    "codex": (
+        "Your exec tool terminates commands after 10s by default, which is "
+        "shorter than a `wait`. Pass an explicit long runtime every time you "
+        "call it -- `timeout_ms`/`yield_time_ms` of 600000, or start a "
+        "code-mode call with `// @exec: {\"yield_time_ms\": 600000}`. If it "
+        "still returns early or empty, that is the cap expiring, not an "
+        "answer and not an error: run `wait` again immediately. Never treat a "
+        "short or silent `wait` as a reason to end your turn."),
+    "claude": (
+        "Your Bash tool times out at 120s by default, so keep `wait` under "
+        "that (its own default is 90s) or pass a longer tool timeout. A wait "
+        "that returns with nothing is normal -- run it again."),
+    "gemini": (
+        "If your shell tool cuts `wait` short, that is the tool's cap, not an "
+        "answer: run `wait` again immediately rather than ending your turn."),
+}
+
+
+def wait_note(provider: str) -> str:
+    return WAIT_NOTES.get((provider or "").lower(), GENERIC_WAIT_NOTE)
 
 
 def _claude_tui(c: dict) -> list[str]:
@@ -1541,11 +1651,18 @@ def orca_bin() -> str | None:
     return fallback if fallback and Path(fallback).exists() else None
 
 
-def open_orca_tab(title: str, runner: Path, cwd: Path) -> str:
-    """Open the partner as a tab in the current Orca worktree."""
+def open_orca_tab(title: str, runner: Path, cwd: Path) -> dict:
+    """Open the partner as a tab in the current Orca worktree.
+
+    Returns the tab's handle alongside the label: Orca can type into a tab it
+    created (`terminal send`), which is the only way to wake an agent whose CLI
+    has no Stop hook and has stopped looping. Discarding the handle here would
+    mean re-deriving it from a title match later, which breaks the moment a tab
+    is renamed.
+    """
     orca = orca_bin()
     if not orca:
-        return ""
+        return {}
     cmd = (f'cmd /c "{runner}"' if os.name == "nt" else f'bash "{runner}"')
     argv = [orca, "terminal", "create", "--worktree", f"path:{cwd}",
             "--title", title, "--command", cmd, "--json"]
@@ -1553,49 +1670,64 @@ def open_orca_tab(title: str, runner: Path, cwd: Path) -> str:
         r = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=60)
     except (OSError, subprocess.TimeoutExpired):
-        return ""
+        return {}
     if r.returncode != 0:
-        return ""
+        return {}
+    handle = ""
     try:
-        if json.loads(r.stdout).get("ok") is False:
-            return ""
-    except json.JSONDecodeError:
+        out = json.loads(r.stdout)
+        if out.get("ok") is False:
+            return {}
+        handle = str((out.get("result", {}).get("terminal", {}) or {}).get("handle", ""))
+    except (json.JSONDecodeError, AttributeError):
         pass
-    return "Orca tab"
+    return {"label": "Orca tab", "kind": "orca", "handle": handle}
 
 
-def tab_command(title: str, runner: Path, cwd: Path) -> tuple[list[str], str] | None:
-    """Pick the best available way to open a new tab. Returns (argv, label)."""
+def tab_command(title: str, runner: Path,
+                cwd: Path) -> tuple[list[str], str, str] | None:
+    """Pick the best available way to open a new tab.
+
+    Returns (argv, label, kind). `kind` is what `nudge` dispatches on later --
+    the terminals that can be typed into from outside are exactly the ones with
+    a control CLI, and which one opened the tab is not recoverable afterwards.
+    """
     r, c = str(runner), str(cwd)
 
     # Multiplexers first: if the user is already in one, a real tab is free.
     if os.environ.get("TMUX") and _has("tmux"):
-        return ["tmux", "new-window", "-n", title, "-c", c, f"bash {r}"], "tmux tab"
+        return (["tmux", "new-window", "-n", title, "-c", c, f"bash {r}"],
+                "tmux tab", "tmux")
     if os.environ.get("ZELLIJ") and _has("zellij"):
-        return ["zellij", "run", "--name", title, "--cwd", c, "--", "bash", r], "zellij pane"
+        return (["zellij", "run", "--name", title, "--cwd", c, "--", "bash", r],
+                "zellij pane", "zellij")
 
     # Cross-platform terminals with a control CLI.
     if _has("wezterm"):
-        return ["wezterm", "cli", "spawn", "--cwd", c, "--", "bash", r], "WezTerm tab"
+        return (["wezterm", "cli", "spawn", "--cwd", c, "--", "bash", r],
+                "WezTerm tab", "wezterm")
     if _has("kitty") and os.environ.get("KITTY_LISTEN_ON"):
-        return ["kitty", "@", "launch", "--type=tab", "--tab-title", title,
-                "--cwd", c, "bash", r], "kitty tab"
+        return (["kitty", "@", "launch", "--type=tab", "--tab-title", title,
+                 "--cwd", c, "bash", r], "kitty tab", "kitty")
 
     if os.name == "nt":
         if _has("wt.exe") or _has("wt"):
-            return [shutil.which("wt.exe") or "wt", "-w", "0", "nt",
-                    "--title", title, "-d", c, "cmd.exe", "/k", r], "Windows Terminal tab"
-        return ["cmd.exe", "/c", "start", title, "cmd.exe", "/k", r], "cmd window"
+            return ([shutil.which("wt.exe") or "wt", "-w", "0", "nt",
+                     "--title", title, "-d", c, "cmd.exe", "/k", r],
+                    "Windows Terminal tab", "other")
+        return (["cmd.exe", "/c", "start", title, "cmd.exe", "/k", r],
+                "cmd window", "other")
 
     if sys.platform == "darwin":
         if Path("/Applications/iTerm.app").exists():
             script = ('tell application "iTerm2" to if it is running then' + NL
                       + '  tell current window to create tab with default profile '
                       + f'command "bash {r}"' + NL + 'end if')
-            return ["osascript", "-e", script], "iTerm2 tab"
-        return ["osascript", "-e",
-                f'tell application "Terminal" to do script "bash {r}"',
-                "-e", 'tell application "Terminal" to activate'], "Terminal.app tab"
+            return ["osascript", "-e", script], "iTerm2 tab", "other"
+        return (["osascript", "-e",
+                 f'tell application "Terminal" to do script "bash {r}"',
+                 "-e", 'tell application "Terminal" to activate'],
+                "Terminal.app tab", "other")
 
     for argv, label in (
         (["gnome-terminal", "--tab", f"--title={title}", "--", "bash", r], "GNOME Terminal tab"),
@@ -1606,26 +1738,211 @@ def tab_command(title: str, runner: Path, cwd: Path) -> tuple[list[str], str] | 
         (["xterm", "-T", title, "-e", "bash", r], "xterm window"),
     ):
         if _has(argv[0]):
-            return argv, label
+            return argv, label, "other"
     return None
 
 
-def open_tab(title: str, runner: Path, cwd: Path) -> str:
+def open_tab(title: str, runner: Path, cwd: Path) -> dict:
+    """Open a tab and describe it: {label, kind, handle, title}.
+
+    The description is stored on the roster entry because waking a silent agent
+    later needs to know which terminal owns its tab.
+    """
     # Orca first: inside it, a detached OS terminal would put the partner
     # outside the workspace the user is looking at.
-    label = open_orca_tab(title, runner, cwd)
-    if label:
-        return label
+    tab = open_orca_tab(title, runner, cwd)
+    if tab:
+        return {**tab, "title": title}
     picked = tab_command(title, runner, cwd)
     if not picked:
-        return ""
-    argv, label = picked
+        return {}
+    argv, label, kind = picked
+    handle = ""
     try:
-        subprocess.Popen(argv, cwd=str(cwd),
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return label
-    except OSError:
+        if kind == "wezterm":
+            # `wezterm cli spawn` prints the new pane id, and `send-text`
+            # addresses panes by id -- so it is captured rather than discarded.
+            r = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=60)
+            if r.returncode != 0:
+                return {}
+            handle = r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ""
+        else:
+            subprocess.Popen(argv, cwd=str(cwd),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        return {}
+    return {"label": label, "kind": kind, "handle": handle, "title": title}
+
+
+# --------------------------------------------------------------------------
+# waking an agent that stopped listening
+# --------------------------------------------------------------------------
+# A tab agent participates by blocking on `wait`. When it ends its turn instead
+# -- because its shell tool cut a wait short, because a discussion concluded,
+# or because the baton moved away -- nothing re-invokes it and the next thing
+# said to it lands in a transcript nobody is reading.
+#
+# Claude Code agents have a Stop hook to catch that. A codex or gemini tab has
+# no equivalent, so the recovery has to come from outside: type into its tab,
+# exactly as the human would. Every terminal with a control CLI can do that,
+# and `spawn` records which one owns each tab.
+
+def _orca_handle_for(title: str) -> str:
+    """Find a live Orca tab by title, for agents spawned before handles were
+    recorded (or whose tab was recreated)."""
+    orca = orca_bin()
+    if not orca:
         return ""
+    try:
+        r = subprocess.run([orca, "terminal", "list", "--json"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30)
+        if r.returncode != 0:
+            return ""
+        res = json.loads(r.stdout).get("result", {})
+        for t in (res.get("terminals") or res.get("items") or []):
+            if str(t.get("title", "")) == title:
+                return str(t.get("handle", ""))
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, AttributeError):
+        pass
+    return ""
+
+
+def nudge_command(entry: dict, pid: str, text: str) -> list[str] | None:
+    """The argv that types `text` plus Enter into this agent's tab."""
+    kind = entry.get("tab_kind") or ""
+    handle = entry.get("tab_handle") or ""
+    title = entry.get("tab_title") or f"partner:{pid}"
+
+    if kind == "orca" or (not kind and orca_bin()):
+        orca = orca_bin()
+        handle = handle or _orca_handle_for(title)
+        if orca and handle:
+            return [orca, "terminal", "send", "--terminal", handle,
+                    "--text", text, "--enter"]
+        return None
+    if kind == "tmux" and _has("tmux"):
+        return ["tmux", "send-keys", "-t", title, text, "Enter"]
+    if kind == "wezterm" and _has("wezterm") and handle:
+        return ["wezterm", "cli", "send-text", "--pane-id", handle,
+                "--no-paste", text + NL]
+    if kind == "kitty" and _has("kitty"):
+        return ["kitty", "@", "send-text", "--match", f"title:{title}",
+                text + NL]
+    return None
+
+
+def nudge_text(pid: str, why: str) -> str:
+    """What gets typed into the tab.
+
+    It arrives in the agent's prompt exactly as if the human had typed it, so
+    it has to say that it is not the human -- otherwise a woken agent follows
+    the baton rule ("the human addressed me -> claim") and takes write
+    permission away from whoever actually has it. It also has to be harmless
+    when the CLI has already exited and a shell reads the line instead.
+    """
+    rel = f".partner/{pid}"
+    run = rel.replace("/", "\\") + "\\p.cmd" if os.name == "nt" else rel + "/p.sh"
+    return (f"continue -- automated wake-up from the partner transcript, NOT "
+            f"the human: {why} Do NOT claim the baton; nobody has given you an "
+            f"instruction. Run `{run} read`, answer what it shows with "
+            f"`{run} send`, then go back to `{run} wait` and keep looping.")
+
+
+def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
+                throttle: int = NUDGE_WINDOW) -> dict:
+    """Type a wake-up line into one agent's tab.
+
+    Throttled through a marker in the target's own directory rather than the
+    caller's, so three agents noticing the same silent partner in the same
+    minute produce one nudge between them, not three.
+    """
+    entry = (roster.get("partners") or {}).get(pid) or {}
+    if not entry:
+        return {"id": pid, "nudged": False, "why": "unknown agent"}
+    if (entry.get("kind") or "tab") == "session":
+        # The session agent has no tab to type into; its harness re-invokes it
+        # when its background `wait` returns, and its Stop hook catches the rest.
+        return {"id": pid, "nudged": False, "why": "session agent has no tab"}
+    if entry.get("status") != "running":
+        return {"id": pid, "nudged": False, "why": "not running"}
+    if throttle and _nag_throttled(sd / pid / ".nudge", throttle):
+        # Somebody already woke it inside the window: handled, not a failure.
+        return {"id": pid, "nudged": False, "throttled": True,
+                "why": "nudged moments ago"}
+    argv = nudge_command(entry, pid, nudge_text(pid, why))
+    if not argv:
+        manual = entry.get("runner") or f"{sd / pid}/run.sh"
+        return {"id": pid, "nudged": False,
+                "why": f"no way to type into a {entry.get('tab') or 'detached'} "
+                       f"tab -- type \"continue\" in {pid}'s tab yourself, or "
+                       f"restart it with: {manual}"}
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"id": pid, "nudged": False, "why": f"{type(exc).__name__}"}
+    if r.returncode != 0:
+        return {"id": pid, "nudged": False,
+                "why": (r.stderr or r.stdout or "").strip()[:200] or "send failed"}
+    return {"id": pid, "nudged": True, "why": why}
+
+
+def silent_agents(sd: Path, roster: dict, who: str,
+                  targets: list[str] | None = None) -> list[str]:
+    """Running tab agents that nothing is listening on behalf of.
+
+    `is_listening` answers "a `wait` is in flight right now", which is the only
+    question that matters here -- an agent that just replied and then stopped
+    looks busy by every other measure, and is exactly the one about to miss the
+    next message.
+    """
+    out = []
+    for pid, entry in (roster.get("partners") or {}).items():
+        if pid == who or entry.get("status") != "running":
+            continue
+        if (entry.get("kind") or "tab") == "session":
+            continue
+        if targets is not None and pid not in targets:
+            continue
+        if is_listening(sd, roster, pid):
+            continue
+        age = _age_seconds(last_seen(sd, pid))
+        # Give a newly spawned agent time to reach its first `wait` before
+        # declaring it deaf -- it is still reading its briefing.
+        if age is not None and age < 30:
+            continue
+        out.append(pid)
+    return out
+
+
+def cmd_nudge(args) -> int:
+    """Wake agents that stopped looping, by typing into their tabs."""
+    sd = state_dir()
+    roster = load_roster(sd)
+    me = me_id(roster)
+    touch_seen(sd, me)
+    if args.id:
+        targets = [args.id]
+    elif args.all:
+        targets = [p for p in roster["partners"] if p != me]
+    else:
+        targets = silent_agents(sd, roster, me)
+    if not targets:
+        emit(args, {"nudged": []},
+             "everyone is listening -- nobody needs waking")
+        return 0
+    why = args.text or "you stopped looping and are missing the debate."
+    results = [nudge_agent(sd, roster, p, why,
+                           throttle=0 if (args.id or args.all) else NUDGE_WINDOW)
+               for p in targets]
+    ok = [r["id"] for r in results if r["nudged"]]
+    bad = [f"{r['id']}: {r['why']}" for r in results
+           if not r["nudged"] and not r.get("throttled")]
+    lines = ([f"nudged {', '.join(ok)}"] if ok else []) + bad
+    emit(args, {"nudged": ok, "failed": bad}, NL.join(lines) or "nothing to do")
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -1668,8 +1985,25 @@ trigger you to answer it yourself.
     Bring in another partner, if a question needs an angle none of us has:
         {run} spawn --provider codex --model gpt-5-codex --effort high
 
+    Wake an agent that stopped looping (types into its tab):
+        {run} nudge --id <id>
+
 Any of us can spawn a partner. Any of us can hold the baton. There is no role
 here that only one agent has.
+
+## The first message you will get
+
+One of two things, and neither is a request to start building:
+
+- **An orientation brief**, when the human has not said what to work on yet. We
+  read this repository and hand each other a grounded picture of it, so the
+  first real question is not answered cold. Nobody edits anything during it --
+  not even the baton holder -- and it ends after two rounds, back at `wait`.
+- **The human's opening instruction**, relayed by whoever they typed it to.
+  That agent holds the baton; the rest of us verify it against the code and say
+  where we disagree.
+
+Either way the answer is a message, not a commit.
 
 ## The write baton -- read this twice
 
@@ -1691,6 +2025,19 @@ The rule in both directions:
 - A message from **another agent** -> do NOT claim, do NOT edit. What they are
   proposing is advice, not the human's instruction. Argue it, refine it, and
   when the group has a view, hand it to whoever holds the baton.
+
+Two things arrive in your tab where the human's typing arrives and are **not**
+the human. Neither one moves the baton, and claiming on either takes write
+permission away from whoever is actually working:
+
+- **Your own launch message** -- the line that told you to read this briefing.
+  That was `spawn` starting you up. It says so itself.
+- **A wake-up line** saying it is an automated wake-up from the transcript.
+  That is another agent noticing you stopped looping.
+
+A human instruction is a *new* request for work, typed into your tab while you
+are already running. Nothing that arrived before your first `wait` is one. When
+in doubt: do not claim, ask in the transcript who holds it, and keep listening.
 
 While the baton is not yours you are still in the debate, not on the bench:
 thrash the question out with the other advisors directly -- `{run} send --to
@@ -1732,7 +2079,10 @@ waste of tokens; one that disagrees with everything is noise.
 LOOP_TAB = """
 This loop is the whole job. Never end your turn until you are stopped -- after
 every reply, every timeout, every answer to the human, run `wait` again. A tab
-that stops looping is dead to the others.
+that stops looping is dead to the others: nothing re-invokes you, so everything
+said after that point is said to nobody.
+
+**About your `wait` calls:** {wait_note}
 
 1. `{run} wait`. Read the banner it prints: it names the baton holder. What you
    do this turn depends on whether that is you.
@@ -1771,9 +2121,15 @@ Unsure what was already said? `{run} read` or open the transcript before you
 reply -- never from stale memory. You never receive your own messages, so you
 cannot answer yourself.
 
-A Stop hook holds you to both halves of that: it blocks the turn from ending
-while a message to you or `@all` is unanswered, and again if no `wait` is in
-flight for you. Answer, go back to `wait`, and it lets you go.
+If a wake-up line appears in your tab telling you that you stopped looping,
+that is another agent noticing your silence: `read`, answer what is there, and
+get back into `wait`. You can do the same for them -- `{run} nudge` types a
+wake-up into the tab of anyone nothing is listening for.
+
+A Stop hook holds you to both halves of that in Claude Code: it blocks the turn
+from ending while a message to you or `@all` is unanswered, and again if no
+`wait` is in flight for you. Other CLIs have no such hook, which is exactly why
+the discipline has to be yours.
 """
 
 LOOP_SESSION = """
@@ -1785,6 +2141,8 @@ human talking to you. Run it as a BACKGROUND shell command instead (the Bash
 tool with run_in_background: true). Claude Code re-invokes you when it returns --
 someone spoke, or it timed out. Keep exactly ONE background `wait` in flight and
 re-arm it at the end of every turn.
+
+**About your `wait` calls:** {wait_note}
 
 The human is often working in another agent's tab, not talking to you. Your
 background `wait` is the only way you hear what is said there; without it you go
@@ -1824,7 +2182,31 @@ you to advisor; it does not excuse you from listening.
 Stop only on a system message saying you were stopped. A Stop hook holds you to
 both halves of this: it blocks the turn from ending while a message to you or
 `@all` is unanswered, and again if no `wait` is in flight for you.
+
+`read` and `wait` tell you when another agent has no `wait` in flight -- a tab
+CLI with no Stop hook of its own that ended its turn and is now deaf. `{run}
+nudge --id <id>` types a wake-up into its tab; `send` does it for you when the
+agent you are writing to is the silent one. Do it rather than concluding that a
+partner has nothing to say.
 """
+
+
+def boot_prompt(seed_f: Path, holder: str) -> str:
+    """The one line a partner's CLI is started with.
+
+    It arrives in the tab exactly where the human's own typing arrives, and a
+    briefing that says "the human addressing you means claim the baton" makes
+    that ambiguity expensive: the agent claims on its own launch message and
+    quietly takes write permission from whoever actually has it. It happens
+    intermittently, because reading it as an instruction is a judgement call.
+    So the launch message disowns itself explicitly.
+    """
+    return (f"[automated launch message from `partner.py spawn` -- NOT a human "
+            f"instruction. Do not run `claim`; the write baton belongs to "
+            f"{holder} until the human types something new in this tab.] "
+            f"Read {seed_f} and follow it exactly. It explains who you are, "
+            f"who you are working with, and how to talk to them. Begin now by "
+            f"entering the wait loop it describes.")
 
 
 def build_seed(pid: str, roster: dict, root: Path, sd: Path,
@@ -1842,7 +2224,11 @@ def build_seed(pid: str, roster: dict, root: Path, sd: Path,
                if has_handoff else
                f"{NL}Nothing has been decided yet.{NL}")
     run = write_wrappers(sd, script, pid)
-    loop = (LOOP_SESSION if kind == "session" else LOOP_TAB).format(run=run)
+    # Each CLI caps command runtime differently, and a capped `wait` returning
+    # early is the most common reason an agent talks itself out of the loop --
+    # so the cap its own CLI imposes goes in its own briefing.
+    loop = (LOOP_SESSION if kind == "session" else LOOP_TAB).format(
+        run=run, wait_note=wait_note(p.get("provider") or ""))
     human_input = ("They type into your terminal tab."
                    if kind == "tab" else
                    "They reach you through your own Claude Code harness, not a "
@@ -1952,13 +2338,17 @@ def cmd_spawn(args) -> int:
 
     # The starting prompt only points at the seed. Keeping it short avoids
     # pushing a multi-kilobyte argument through a terminal command line.
-    boot = (f"Read {seed_f} and follow it exactly. It explains who you are, "
-            f"who you are working with, and how to talk to them. Begin now.")
+    boot = boot_prompt(seed_f, baton_of(roster))
 
     argv = build_tui(entry, boot)
     runner = write_runner(pdir, argv, root)
-    label = "" if args.no_tab else open_tab(f"partner:{pid}", runner, root)
+    tab = {} if args.no_tab else open_tab(f"partner:{pid}", runner, root)
+    label = tab.get("label", "")
     entry["tab"] = label
+    # Kept so a silent agent can be woken later by typing into its own tab.
+    entry["tab_kind"] = tab.get("kind", "")
+    entry["tab_handle"] = tab.get("handle", "")
+    entry["tab_title"] = tab.get("title", f"partner:{pid}")
     entry["runner"] = str(runner)
     save_roster(sd, roster)
 
@@ -2145,12 +2535,15 @@ def relaunch(sd: Path, pid: str, roster: dict, root: Path, script: Path,
     pdir.mkdir(parents=True, exist_ok=True)
     seed_f = write_briefing(sd, pid, roster, root, script, None,
                             kind=entry.get("kind") or "tab")
-    boot = (f"Read {seed_f} and follow it exactly. It explains who you are, "
-            f"who you are working with, and how to talk to them. Begin now.")
+    boot = boot_prompt(seed_f, baton_of(roster))
     argv = build_tui(entry, boot)
     runner = write_runner(pdir, argv, root)
-    label = "" if no_tab else open_tab(f"partner:{pid}", runner, root)
+    tab = {} if no_tab else open_tab(f"partner:{pid}", runner, root)
+    label = tab.get("label", "")
     entry["tab"] = label
+    entry["tab_kind"] = tab.get("kind", "")
+    entry["tab_handle"] = tab.get("handle", "")
+    entry["tab_title"] = tab.get("title", f"partner:{pid}")
     entry["runner"] = str(runner)
     entry["status"] = "running"
     return label, runner
@@ -2394,7 +2787,9 @@ def cmd_state(args) -> int:
                            f"keeps it and joins")
     elif stale:
         rec, why = "ask", (f"{', '.join(stale)} in the roster but not responding -- "
-                           f"`/partner` archives and starts fresh; `resume` rebuilds them")
+                           f"try `nudge` first (a tab that stopped looping wakes "
+                           f"up); `resume` rebuilds them; `/partner` archives and "
+                           f"starts fresh")
     elif past:
         rec, why = "ask", ("no partners running -- `/partner` starts fresh, "
                            "`resume --session <id>` brings an archived one back")
@@ -2442,8 +2837,30 @@ def cmd_send(args) -> int:
     before = chat.stat().st_size if chat.exists() else 0
     append_msg(sd, args.sender, args.to, body, baton_of(roster))
 
+    # A message to an agent that stopped looping is a message nobody will ever
+    # read: nothing re-invokes a tab whose CLI ended its turn. Sending is the
+    # moment that matters, so the recipients are checked here and woken by
+    # typing into their tabs -- the recovery the human would otherwise have to
+    # perform by hand, usually after wondering for ten minutes why p2 is quiet.
+    addressed = None if args.to in ("@all", "all") else [args.to]
+    woke, deaf = [], []
+    if not args.no_nudge:
+        for pid in silent_agents(sd, roster, args.sender, addressed):
+            r = nudge_agent(sd, roster, pid,
+                            f"{args.sender} sent you a message you have not read.")
+            if r["nudged"]:
+                woke.append(r["id"])
+            elif not r.get("throttled"):
+                deaf.append(f"{r['id']} ({r['why']})")
+    tail = ""
+    if woke:
+        tail += f"{NL}woke {', '.join(woke)} -- they were not listening"
+    if deaf:
+        tail += f"{NL}not listening and could not be woken: {', '.join(deaf)}"
+
     if not args.wait:
-        emit(args, {"sent": True, "to": args.to}, f"sent to {args.to}")
+        emit(args, {"sent": True, "to": args.to, "woke": woke, "deaf": deaf},
+             f"sent to {args.to}{tail}")
         return 0
 
     running = [k for k, v in roster["partners"].items()
@@ -2464,8 +2881,91 @@ def cmd_send(args) -> int:
     text = render(replies) or (
         f"(no reply within {args.wait}s -- check the agent tabs; "
         f"they answer when they next run `wait`)")
-    emit(args, {"replies": replies}, text)
+    silent = silent_agents(sd, load_roster(sd), args.sender, addressed)
+    if silent:
+        text += (f"{NL * 2}[{', '.join(silent)} still have no `wait` in flight. "
+                 f"`nudge --id <id>`, or look at the tab.]")
+    emit(args, {"replies": replies, "woke": woke, "deaf": deaf,
+                "silent": silent}, text + tail)
     return 0
+
+
+# --------------------------------------------------------------------------
+# the opening move of a session
+# --------------------------------------------------------------------------
+# A roster full of briefed agents is not yet a debate: everyone is blocked on
+# `wait` and nobody has been asked anything. The session either opens with what
+# the human wants done, or -- when they have nothing to give yet -- with the
+# agents working out what this repository actually is, so the first real
+# question does not have to be answered from a cold read.
+#
+# Both are one canned message so every agent receives the same protocol in the
+# same words. Improvised versions drift, and a partner given a vague "have a
+# look around" produces a summary nobody asked for and then stops looping.
+
+EXPLORE_BRIEF = """**Orientation pass -- no instruction from the human yet.**
+
+Before the first real question arrives, build shared context on this repository
+so none of us answers it from a cold read. This is investigation, not work.
+
+Rules, all of them binding:
+
+- **Nobody edits anything.** Not even the baton holder. Read, run read-only
+  commands, and report. If you think something needs changing, say so and leave
+  it -- the human has not asked for a change.
+- **Split the work rather than duplicating it.** Say in your first message which
+  part you are taking (entry points and build/run, data model and core logic,
+  tests and CI, docs and conventions, or whatever this repo actually has), and
+  read what the others claim before choosing.
+- **Ground every claim.** Cite `path:line` and name the command you ran. "It
+  looks like a CLI" is worthless; "`pyproject.toml:12` declares the console
+  script, so it is a CLI" is not.
+- **Report what surprised you**, not what is obvious from the directory names --
+  conventions the code follows, invariants it assumes, anything that looks
+  load-bearing or fragile, and anything that contradicts what the others found.
+- **Converge in at most two rounds**, then stop. `send --to @all` a short joint
+  picture: what this project is, how it is structured, what we should be careful
+  with, and the open questions we would want the human to settle. Disagreements
+  stay in as disagreements.
+
+Then go back to `wait` and stay there. Do not invent work, do not start
+improving anything, and do not keep exploring past the two rounds -- the point
+is to be ready for the human's first question, not to fill the silence.
+"""
+
+OPENING = """**The human has given {sender} this instruction. This is the
+session's opening question -- {sender} holds the baton and acts; everyone else
+verifies and argues.**
+
+{text}
+
+Work it the normal way: state your own position first, check the claims in it
+against the actual code (`path:line`, and name the command you ran), and say
+plainly where you disagree and what you would do instead. If the instruction is
+underspecified, say which assumption you are making rather than picking one
+silently. Two exchanges without movement means it is a judgement call for the
+human -- say so and let them settle it.
+
+Then go back to `wait`.
+"""
+
+
+def cmd_kickoff(args) -> int:
+    """Open the session: put the human's instruction, or an orientation brief,
+    in front of everyone in one message."""
+    sd = state_dir()
+    roster = load_roster(sd)
+    sender = args.sender or me_id(roster)
+    text = args.text
+    if args.file:
+        text = Path(args.file).read_text(encoding="utf-8")
+    body = (OPENING.format(sender=sender, text=text.strip())
+            if text and text.strip() else EXPLORE_BRIEF)
+    ns = argparse.Namespace(
+        json=getattr(args, "json", False), quiet=False, sender=sender,
+        to="@all", text=body, file=None, wait=args.wait, expect=args.expect,
+        no_nudge=False)
+    return cmd_send(ns)
 
 
 def cmd_read(args) -> int:
@@ -2479,7 +2979,8 @@ def cmd_read(args) -> int:
                           "messages": msgs}, indent=2))
     else:
         print(baton_banner(roster, who) + NL * 2
-              + (render(msgs) or "(nothing new)"))
+              + (render(msgs) or "(nothing new)")
+              + silence_notice(sd, roster, who))
     return 0
 
 
@@ -2947,7 +3448,26 @@ def main() -> int:
     s.add_argument("--file", default=None)
     s.add_argument("--wait", type=int, default=0, help="block N seconds for replies")
     s.add_argument("--expect", type=int, default=0, help="how many repliers to wait for")
+    s.add_argument("--no-nudge", action="store_true",
+                   help="do not wake recipients that stopped listening")
     s.set_defaults(fn=cmd_send)
+
+    ko = sub.add_parser("kickoff", help="open the session: the human's first "
+                                        "instruction, or an orientation pass")
+    ko.add_argument("--from", dest="sender", default=None)
+    ko.add_argument("--text", default=None,
+                    help="what the human wants worked on; omit for orientation")
+    ko.add_argument("--file", default=None, help="read the instruction from a file")
+    ko.add_argument("--wait", type=int, default=0, help="block N seconds for replies")
+    ko.add_argument("--expect", type=int, default=0)
+    ko.set_defaults(fn=cmd_kickoff)
+
+    ng = sub.add_parser("nudge", help="wake agents that stopped looping by "
+                                      "typing into their tabs")
+    ng.add_argument("--id", default=None, help="one agent; omit for everyone silent")
+    ng.add_argument("--all", action="store_true", help="every agent but you")
+    ng.add_argument("--text", default=None, help="why they are being woken")
+    ng.set_defaults(fn=cmd_nudge)
 
     r = sub.add_parser("read")
     r.add_argument("--for", dest="who", default=None,
@@ -2961,6 +3481,9 @@ def main() -> int:
 
     cl = sub.add_parser("claim", help="take the baton: the human just told YOU to act")
     cl.add_argument("--for", dest="who", default=None)
+    cl.add_argument("--force", action="store_true",
+                    help="claim within the launch grace period anyway -- the "
+                         "human really did just type an instruction")
     cl.set_defaults(fn=cmd_claim)
 
     st = sub.add_parser("stop")

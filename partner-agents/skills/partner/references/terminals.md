@@ -71,6 +71,22 @@ Relay that command to the user rather than reporting the spawn as failed — eve
 
 `--no-tab` requests this deliberately, which is also the right choice when driving partners from a script or a CI job.
 
+## Typing into a tab that has gone quiet
+
+A tab agent whose CLI ended its turn cannot be reached from inside the system — nothing re-invokes it. The recovery is to type into its tab the way the human would, so `spawn` records which terminal owns each tab (`tab_kind`, `tab_handle`, `tab_title` on the roster entry): the owning terminal is not recoverable after the fact, and a title match breaks the moment a tab is renamed.
+
+| Tab opened by | How `nudge` types into it |
+|---------------|---------------------------|
+| Orca | `orca terminal send --terminal <handle> --text … --enter` (handle from `terminal create --json`, falling back to a title match in `terminal list`) |
+| tmux | `tmux send-keys -t partner:<id> "…" Enter` |
+| WezTerm | `wezterm cli send-text --pane-id <id> --no-paste` (pane id captured from `cli spawn`) |
+| kitty | `kitty @ send-text --match title:partner:<id>` |
+| everything else | not possible — `nudge` says so and prints the command that restarts the agent |
+
+Windows Terminal, iTerm2, Terminal.app and the Linux desktop terminals have no way to inject input into an existing tab, so partners there recover by hand: the human types in the tab, or the printed `run.cmd`/`run.sh` restarts the agent. Inside Orca, or in tmux/WezTerm/kitty, it is automatic — `send` wakes a recipient that is not listening.
+
+The line that gets typed opens by saying it is an automated wake-up and not the human, and tells the agent not to claim the baton. Without that, an agent follows its briefing ("the human addressed me → claim") and takes write permission from whoever is actually working.
+
 ## Verifying a tab
 
 `python partner.py providers` ends with a line saying where partners will open, so it can be checked before spawning anything:

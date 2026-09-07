@@ -15,7 +15,9 @@ A partner is a **separate process** with its own provider, model, and context �
 - **Every partner is a full interactive session.** Walk into any tab and type at that agent directly — it answers you, then goes back to debating. Between your interruptions it drives itself.
 - **No permission dialogs to babysit.** Partners start with prompting relaxed (`--auto ask | edits | full`), so you are not approving edits in three tabs at once.
 - **Joins mid-work with the context intact.** Spawn a partner twenty exchanges into a hard problem and it arrives knowing the branch, the uncommitted diff, and the argument so far — plus whatever briefing you write. Each partner keeps its own, so adding a third never overwrites what the second was told.
+- **Asks what to start on, and takes any answer.** Once the partners are up you are asked what to work on — free text, a bug, a doubt, or another skill or slash command to run through the debate. Say nothing and the agents orient themselves instead: they split this repository between them, read it, cite `path:line`, and hand each other one grounded picture of what it is and what to be careful with — editing nothing, converging in two rounds, then waiting for you. Your first real question is not answered from a cold read.
 - **Debates every question.** Once a partner is running, the skill puts each question and decision to it, weighs the pushback against the actual code, and reports the argument rather than hiding it.
+- **Keeps partners in the loop, and wakes them when they fall out.** Every CLI caps how long a shell command may run — codex kills one after 10s — which used to kill the blocking `wait` an agent's loop depends on and leave the tab silent for good. Now each partner is briefed on its own CLI's cap, `wait` explains itself before it blocks, and any agent nothing is listening for gets a wake-up typed straight into its tab (Orca, tmux, WezTerm, kitty). A message to a stalled partner wakes it instead of vanishing.
 - **No lead agent, and it is structural.** The session you are typing in registers itself as `p1` with the same config fields, the same briefing document and its own identity wrapper as every agent it spawns — built by the same code, so the two cannot drift. Any partner can spawn more partners; any partner can take the baton. The only asymmetry is the baton, and it moves.
 - **Only the partner you just spoke to can write.** The write baton follows your attention: the moment you type an instruction into a tab, that agent claims it and the others are told to stop editing. A partner asking another partner to change something is a suggestion, not an instruction — it does not move the baton. Concurrent edits produce conflicts nobody can see.
 - **Runs as many partners as you want** — `p2`, `p3`, `p4` alongside you, each with its own provider, model and effort, all debating in one shared transcript.
@@ -48,6 +50,8 @@ cc --plugin-dir ./cc-stuff/partner-agents
 /partner baton p2                     # hand editing to p2 deliberately
 /partner stop --all
 ```
+
+You are then asked what to start on — anything goes, including another slash command to run through the debate. Say nothing and the partners spend a round working out what this repository is before waiting for you.
 
 Then just keep working. Every question after that gets debated before it gets answered.
 
@@ -196,12 +200,16 @@ Each tab runs the provider's ordinary interactive interface, started on a briefi
 
 `p1` — the session the skill was invoked in — can't block in the foreground without cutting off the human who talks to it through that same session. It runs the identical loop with `wait` as a background command instead, re-armed at the end of every turn, so it stays in the debate even while the human is working in a partner's tab.
 
+Two things follow from a tab having exactly one input, and both are handled in text because nothing else can distinguish them. A partner's **launch prompt** and an automated **wake-up** arrive where your typing arrives, so each opens by disowning itself, and `claim` refuses a claim from an agent that started seconds ago and has not spoken yet (`claim --force` when you really did just address a new partner) — otherwise a fresh partner intermittently reads its own boot message as an instruction and takes the write baton from whoever is working.
+
 ## Documentation
 
 - [`skills/partner/SKILL.md`](./skills/partner/SKILL.md) — the workflow
 - [`references/providers.md`](./skills/partner/references/providers.md) — provider flags and adding your own
 - [`references/protocol.md`](./skills/partner/references/protocol.md) — transcript format, state layout, and the Stop hook
-- [`references/terminals.md`](./skills/partner/references/terminals.md) — terminal detection per OS
+- [`references/terminals.md`](./skills/partner/references/terminals.md) — terminal detection per OS, and typing into a tab that went quiet
+- [`references/debate.md`](./skills/partner/references/debate.md) — opening a session and the debate loop
+- [`references/troubleshooting.md`](./skills/partner/references/troubleshooting.md) — symptoms, causes and fixes
 
 A `Stop` hook (`hooks/hooks.json`) keeps any agent — the session that ran the skill included — from ending a turn while a message addressed to it is still unanswered in the transcript. It is what stops the non-blocking session agent from going silent the moment the human's attention moves to another tab.
 
