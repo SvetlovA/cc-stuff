@@ -12,6 +12,8 @@
 
 **The CLI the user wants is not in `providers`.** The scan keeps only binaries whose `--help` reads like an agent CLI, and it skips system directories. Try `providers --deep`, which probes by behaviour instead of by name. Failing that the list is not a gate: `spawn --provider <bin>` works on any binary, with flags read from its help — run `probe --provider <bin>` first to see what those will be.
 
+**No terminal could be opened, or the wrong one was used.** `terminals` lists every entry, whether it is usable here and why not, and which one a spawn would pick. Force a different one with `--terminal <name>` or `PARTNER_TERMINAL`. If a terminal is missing from the list, or its flags have changed, add or replace its entry in `~/.claude/partner-terminals.json` (or `.partner/terminals.json` for one repo) — an entry needs `open`, plus `send` if it can be typed into. That is the fix, not a patch to `partner.py`.
+
 **A partner's tab opens on a usage error and closes.** Its flags were probably derived from `--help` and got something wrong. `probe --provider <name>` prints the exact command a spawn builds; `.partner/<id>/run.cmd` (or `run.sh`) holds the one that was actually used. Correct it with `--provider custom --cmd '<the right command with {prompt}>'`, or keep the fix in `~/.claude/partner-providers.json`.
 
 **A partner keeps stopping to ask permission.** Its CLI advertised no accept-edits flag, so `--auto edits` passed nothing — deliberately, since substituting a sandbox-bypass flag would silently do far more than was asked. `probe` shows which auto levels it found. Either pass the CLI's own flag in a `--cmd` template, or spawn with `--auto full` if that is genuinely wanted.

@@ -3,7 +3,7 @@ name: partner
 description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
 argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | stop"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch, Skill
-version: 0.16.0
+version: 0.17.0
 ---
 
 # Partner
@@ -154,7 +154,14 @@ You take `p1` and the partner `p2` (or the next free number when adding). Afterw
 
 ### Step 3 — Confirm the tab opened
 
-`spawn` picks the terminal automatically. **Inside Orca it opens an Orca tab in the current worktree**, beside the session that spawned it rather than in a detached window; elsewhere it uses the platform's terminal (`references/terminals.md`). If none can be opened it prints the command for the user to run — relay that rather than calling the spawn failed.
+`spawn` picks the terminal automatically, and terminals are resolved in the same three layers as providers — hand-checked entries, the user's own `partner-terminals.json`, then **the terminal hosting this session, identified from the environment and driven from its own `--help`** — so a terminal this plugin has never heard of is still used, and a platform default (`cmd.exe`, `open -a Terminal`, `x-terminal-emulator`) guarantees a tab when nothing is recognised. A workspace app or multiplexer the session is already inside wins (so the tab lands beside the session rather than in a detached window), then the terminal on screen, then anything that can open a window:
+
+```bash
+python "$P" terminals              # what can open a tab here, and which wins
+python "$P" spawn ... --terminal kitty   # or PARTNER_TERMINAL=kitty
+```
+
+`terminals` also says whether an agent in that terminal **can be typed into** later, which decides whether a stalled partner can be woken automatically. If nothing can open a tab, `spawn` prints the command for the user to run — relay that rather than calling the spawn failed (`references/terminals.md`).
 
 The tab runs the provider's normal interface on a briefing that tells it to loop: block on `wait`, reply, repeat. The user can read the debate as it happens, interrupt at any moment, and type at that agent — it answers them, then resumes.
 
@@ -204,7 +211,7 @@ A tab agent whose CLI ended its turn is unreachable — nothing re-invokes it, a
 python "$P" nudge [--id p2]        # one, or everyone who stopped listening
 ```
 
-`send` does it automatically for a recipient that is not listening, so a message to a stalled partner wakes it instead of vanishing. A detached OS window cannot be typed into — `nudge` says so and prints the command that restarts the agent, which is what to relay. Wake-ups never move the baton. `references/terminals.md`.
+`send` does it automatically for a recipient that is not listening, so a message to a stalled partner wakes it instead of vanishing. How to type into a tab comes from the same terminal entry that opened it, so a terminal described by the user is woken like a built-in; one that cannot be typed into says so and `nudge` prints the command that restarts the agent, which is what to relay. Wake-ups never move the baton. `references/terminals.md`.
 
 ## The debate protocol
 
@@ -226,6 +233,7 @@ Skip the loop only for mechanical lookups. Anything involving a design choice, a
 
 ```bash
 python "$P" providers [--deep]              # agent CLIs found here; --deep probes unnamed ones
+python "$P" terminals [--prefer X]          # what can open a tab, and which one wins
 python "$P" models [--provider X] [--deep] [--no-probe]   # ids found on this machine + effort
 python "$P" probe --provider X [--refresh]  # flags read from a CLI's own --help
 python "$P" check --provider X [--model M] [--effort E] [--force]
@@ -237,6 +245,7 @@ python "$P" archive [--label "..."]         # file the current session away
 python "$P" snapshot                        # repo state captured for a new partner
 python "$P" spawn --provider X [--model M] [--effort low|medium|high|max]
                   [--auto ask|edits|full] [--name id] [--context TEXT|PATH]
+                  [--terminal X]            # override the terminal choice
                   [--cmd 'template']        # with --provider custom
                   [--force]                 # accept a model the list does not know
                   [--me-provider X --me-model M --me-effort E]   # describes YOU

@@ -1721,12 +1721,540 @@ def provider_spec(prov: str) -> dict:
 
 
 # --------------------------------------------------------------------------
-# terminal tabs
+# terminals
 # --------------------------------------------------------------------------
-# Quoting a nested agent command through wt.exe / osascript / gnome-terminal is
-# where cross-platform launchers normally rot. We sidestep it entirely: write
-# the real command into a per-agent run script, then every terminal only ever
-# has to run one plain file path.
+# A terminal is described the same way a provider is: by data, in one place,
+# with the user able to add or replace an entry without touching this file.
+# There is no blessed set of terminals any more than there is a blessed set of
+# CLIs -- a terminal released this year, or a fork nobody here has heard of, is
+# nameable by whoever has it.
+#
+# Each entry needs at most three things:
+#
+#   open    the command that opens a tab running one script      (required)
+#   send    the command that types a line into that tab, if it can be
+#   handle  where the open command reports an id, when `send` needs one
+#
+# Templates use the same substitution as a provider `--cmd`: split into
+# arguments first, then placeholders replaced inside each argument, so a path
+# with spaces stays one argument and a Windows path is never mangled by shell
+# quoting rules.
+#
+#   {bin}   the resolved binary          {cwd}     the repo root
+#   {run}   the runner script path       {title}   partner:<id>
+#   {shell} the command that runs the runner script through a shell
+#   {text}  the line to type (send only) {handle}  the id from `handle`
+#
+# Detection is per entry, not a hardcoded order of ifs: `env` (any of these set),
+# `bin` (on PATH), `path` (exists), `platform`. Two hints only affect order:
+# an entry whose `env` is set is a host we are already inside, and an entry
+# whose `term` matches $TERM / $TERM_PROGRAM is the terminal the user is
+# actually looking at. Otherwise the table order stands -- multiplexers first,
+# because a tab inside the window the user already has costs nothing; then
+# terminals with a control CLI, since those are also the ones that can be typed
+# into; then whatever else can open a window.
+
+TERMINAL_FILES = [
+    Path.home() / ".claude" / "partner-terminals.json",
+    Path.home() / ".partner" / "terminals.json",
+]
+
+TERMINALS: dict[str, dict] = {
+    # Orca manages its own tabs: inside it, a detached OS terminal would strand
+    # the partner outside the workspace the user is looking at. Its env markers
+    # are set for processes it launches, so they double as the detection.
+    "orca": {
+        "env": ["ORCA_WORKTREE_ID", "ORCA_TERMINAL_HANDLE", "ORCA_TAB_ID"],
+        "bin": "orca",
+        "bin_env": "ORCA_CODEX_LAUNCH_PREFLIGHT",
+        "open": "{bin} terminal create --worktree path:{cwd} --title {title} "
+                "--command {shell} --json",
+        "handle": "json:result.terminal.handle",
+        "send": "{bin} terminal send --terminal {handle} --text {text} --enter",
+        "list": "{bin} terminal list --json",
+        "list_handle": "result.terminals[].handle@title",
+        "list_titles": "result.terminals[].title",
+        "label": "Orca tab",
+    },
+    "tmux": {
+        "env": ["TMUX"], "bin": "tmux",
+        "open": "{bin} new-window -n {title} -c {cwd} {shell}",
+        "send": "{bin} send-keys -t {title} {text} Enter",
+        "label": "tmux tab",
+    },
+    "zellij": {
+        "env": ["ZELLIJ"], "bin": "zellij",
+        "open": "{bin} run --name {title} --cwd {cwd} -- bash {run}",
+        "label": "zellij pane",
+    },
+    "wezterm": {
+        "bin": "wezterm",
+        "open": "{bin} cli spawn --cwd {cwd} -- bash {run}",
+        "handle": "stdout",
+        "send": "{bin} cli send-text --pane-id {handle} --no-paste {text_nl}",
+        "list": "{bin} cli list --format json",
+        "list_handle": "[].pane_id@tab_title",
+        "list_titles": "[].tab_title",
+        "label": "WezTerm tab",
+    },
+    "kitty": {
+        "env": ["KITTY_LISTEN_ON"], "bin": "kitty",
+        "open": "{bin} @ launch --type=tab --tab-title {title} --cwd {cwd} "
+                "bash {run}",
+        "send": "{bin} @ send-text --match title:{title} {text_nl}",
+        "label": "kitty tab",
+    },
+    "ghostty": {
+        "bin": "ghostty", "term": ["ghostty", "xterm-ghostty"],
+        "open": "{bin} +new-window -e bash {run}",
+        "label": "Ghostty window",
+    },
+    "foot": {
+        "bin": "footclient", "env": ["FOOT_SERVER"], "term": ["foot"],
+        "open": "{bin} --working-directory={cwd} --title={title} bash {run}",
+        "label": "foot window",
+    },
+    "rio": {
+        "bin": "rio", "term": ["rio"],
+        "open": "{bin} --working-dir {cwd} -e bash {run}",
+        "label": "Rio window",
+    },
+    "wt": {
+        "platform": "nt", "bin": "wt.exe", "term": ["Windows Terminal"],
+        "open": "{bin} -w 0 nt --title {title} -d {cwd} cmd.exe /k {run}",
+        "label": "Windows Terminal tab",
+    },
+    "cmd": {
+        "platform": "nt", "bin": "cmd.exe",
+        "open": "{bin} /c start {title} cmd.exe /k {run}",
+        "label": "cmd window",
+    },
+    "iterm": {
+        "platform": "darwin", "bin": "osascript",
+        "path": "/Applications/iTerm.app",
+        "open": '{bin} -e tell application "iTerm2" to tell current window to '
+                'create tab with default profile command "bash {run}"',
+        "label": "iTerm2 tab",
+    },
+    "apple-terminal": {
+        "platform": "darwin", "bin": "osascript",
+        "open": '{bin} -e tell application "Terminal" to do script "bash {run}" '
+                '-e tell application "Terminal" to activate',
+        "label": "Terminal.app tab",
+    },
+    "gnome-terminal": {
+        "bin": "gnome-terminal",
+        "open": "{bin} --tab --title={title} -- bash {run}",
+        "label": "GNOME Terminal tab",
+    },
+    "konsole": {
+        "bin": "konsole", "open": "{bin} --new-tab -e bash {run}",
+        "label": "Konsole tab",
+    },
+    "xfce4-terminal": {
+        "bin": "xfce4-terminal",
+        "open": "{bin} --tab --title={title} -e {shell}",
+        "label": "Xfce Terminal tab",
+    },
+    "terminator": {
+        "bin": "terminator", "open": "{bin} -e {shell}",
+        "label": "Terminator window",
+    },
+    "alacritty": {
+        "bin": "alacritty", "open": "{bin} -e bash {run}",
+        "label": "Alacritty window",
+    },
+    "xterm": {
+        "bin": "xterm", "open": "{bin} -T {title} -e bash {run}",
+        "label": "xterm window",
+    },
+    # Last resort, one per platform: whatever the system itself considers "a
+    # terminal", so an unrecognised environment still gets a tab instead of a
+    # manual command. These are the entries that make the feature not depend on
+    # this table being complete.
+    "x-terminal-emulator": {
+        "bin": "x-terminal-emulator",       # Debian/Ubuntu alternatives link
+        "open": "{bin} -e bash {run}",
+        "label": "the system default terminal",
+    },
+    "xdg-terminal-exec": {
+        "bin": "xdg-terminal-exec",         # freedesktop's terminal resolver
+        "open": "{bin} bash {run}",
+        "label": "the desktop's default terminal",
+    },
+    "macos-open": {
+        "platform": "darwin", "bin": "open",
+        "open": "{bin} -a Terminal {run}",
+        "label": "Terminal.app (via open)",
+    },
+}
+
+
+# --------------------------------------------------------------------------
+# terminals this machine has that nothing here has heard of
+# --------------------------------------------------------------------------
+# The table above is an accelerator, exactly like RECIPES for providers: it
+# holds entries whose flags were checked by hand. It is not the set of
+# terminals that work, because that set is not knowable from here -- so there
+# are two more layers, and they are the same two providers have.
+#
+#   * The terminal hosting this process announces itself in the environment.
+#     Every emulator sets something -- TERM_PROGRAM, TERM, or a marker of its
+#     own -- so "what am I running in" is a question the machine answers.
+#   * Whatever that names is then driven from its own `--help`, the same way an
+#     unknown agent CLI is: find the flag that runs a command, the flag that
+#     sets the directory, the flag that sets a title, and build the `open`
+#     template out of what was actually found.
+#
+# And because a spawn must not fail just because nothing was recognised, the
+# table ends with each platform's own idea of "the default terminal" --
+# `cmd.exe` on Windows, `open`/AppleScript on macOS, and the two standard
+# indirections on Linux, which distributions point at whatever the user chose.
+
+# Environment markers that name the terminal hosting this process. These are
+# used to *find and probe* a binary, never as a list of what is allowed --
+# a name here with no built-in entry is discovered, not rejected.
+HOST_ENV_HINTS: list[tuple[str, str]] = [
+    ("WT_SESSION", "wt"),
+    ("KITTY_WINDOW_ID", "kitty"),
+    ("KITTY_LISTEN_ON", "kitty"),
+    ("WEZTERM_PANE", "wezterm"),
+    ("WEZTERM_EXECUTABLE", "wezterm"),
+    ("ALACRITTY_WINDOW_ID", "alacritty"),
+    ("ALACRITTY_SOCKET", "alacritty"),
+    ("GHOSTTY_RESOURCES_DIR", "ghostty"),
+    ("GHOSTTY_BIN_DIR", "ghostty"),
+    ("KONSOLE_VERSION", "konsole"),
+    ("FOOT_SERVER", "footclient"),
+    ("VTE_VERSION", "gnome-terminal"),
+    ("TERMINATOR_UUID", "terminator"),
+    ("TILIX_ID", "tilix"),
+    ("TMUX", "tmux"),
+    ("ZELLIJ", "zellij"),
+]
+
+# What a terminal's own help calls the flags we need. Order is preference, and
+# anything not found is simply not passed -- the same conservatism the provider
+# probe uses, for the same reason: a guessed flag opens a tab that prints a
+# usage error and closes.
+TERM_EXEC_FLAGS = ["-e", "--command", "--", "-x"]
+TERM_CWD_FLAGS = ["--working-directory", "--cwd", "--directory", "--workdir"]
+TERM_TITLE_FLAGS = ["--title", "--tab-title", "-T"]
+# Phrases that mean "this binary is a terminal", read from its help.
+TERM_HELP_SIGNALS = ("terminal emulator", "terminal for", "a terminal",
+                     "terminal multiplexer", "pseudo-terminal", "pty",
+                     "opens a new terminal", "terminal window")
+
+
+def _term_name_from_env() -> list[str]:
+    """Candidate binary names for the terminal hosting this process."""
+    names: list[str] = []
+    for var, name in HOST_ENV_HINTS:
+        if os.environ.get(var):
+            names.append(name)
+    for var in ("TERM_PROGRAM", "TERMINAL_EMULATOR", "TERM"):
+        raw = (os.environ.get(var) or "").strip().lower()
+        if not raw or raw in ("dumb", "linux", "cygwin", "unknown"):
+            continue
+        # "iTerm.app" -> iterm, "xterm-ghostty" -> ghostty, "Apple_Terminal"
+        # -> apple terminal, "JetBrains-JediTerm" -> jetbrains
+        raw = re.sub(r"\.app$", "", raw)
+        parts = [p for p in re.split(r"[-_. ]+", raw)
+                 if p and p not in ("256color", "color", "direct", "truecolor",
+                                    "xterm", "screen", "vt100", "vt220")]
+        if parts:
+            names.append("".join(parts) if len(parts) == 1 else parts[-1])
+            names.append("-".join(parts))
+    seen, out = set(), []
+    for n in names:
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def probe_terminal(name: str, timeout: int = 15,
+                   refresh: bool = False) -> dict | None:
+    """Derive an `open` template for a terminal from its own --help.
+
+    Returns an entry in the same shape as a table one, or None when the binary
+    is missing, does not look like a terminal, or offers no way to hand it a
+    command -- the one thing that cannot be worked around.
+    """
+    binary = shutil.which(name) or (shutil.which(name + ".exe")
+                                    if os.name == "nt" else None)
+    if not binary:
+        return None
+    try:
+        st = Path(binary).stat()
+        key = f"{binary}|{st.st_size}|{int(st.st_mtime)}"
+    except OSError:
+        key = binary
+    cf = cache_dir() / ("term-" + re.sub(r"[^a-z0-9]+", "_", name.lower()) + ".json")
+    if not refresh and cf.exists():
+        try:
+            hit = json.loads(cf.read_text(encoding="utf-8"))
+            if hit.get("key") == key:
+                return hit.get("entry") or None
+        except (OSError, ValueError):
+            pass
+
+    rc, help_text = _run([binary, "--help"], timeout)
+    if len(help_text) < 40:
+        rc, help_text = _run([binary, "-h"], timeout)
+    low = help_text.lower()
+    entry = None
+    if help_text and (any(s in low for s in TERM_HELP_SIGNALS)
+                      or any(f in help_text for f in TERM_EXEC_FLAGS)):
+        exec_flag = next((f for f in TERM_EXEC_FLAGS if f in help_text), None)
+        if exec_flag:
+            cwd_flag = next((f for f in TERM_CWD_FLAGS if f in help_text), None)
+            title_flag = next((f for f in TERM_TITLE_FLAGS if f in help_text), None)
+            parts = ["{bin}"]
+            if cwd_flag:
+                parts += [cwd_flag, "{cwd}"]
+            if title_flag:
+                parts += [title_flag, "{title}"]
+            parts += ([exec_flag] if exec_flag != "--" else ["--"])
+            parts += ["bash", "{run}"]
+            entry = {"bin": name, "open": " ".join(parts),
+                     "label": f"{name} window", "kind_source": "discovered",
+                     "term": [name]}
+    try:
+        cf.parent.mkdir(parents=True, exist_ok=True)
+        cf.write_text(json.dumps({"key": key, "entry": entry}), encoding="utf-8")
+    except OSError:
+        pass
+    return entry
+
+
+def discover_terminals(known: dict) -> dict:
+    """Entries for terminals on this machine that `known` does not cover.
+
+    Only the host terminal is probed, and only when it is not already
+    described: that is the one case where being unrecognised actually costs the
+    user something (a partner opening somewhere other than where they are
+    working), and it keeps this to at most one or two subprocesses.
+    """
+    out: dict = {}
+    for name in _term_name_from_env():
+        if name in known or name in out:
+            continue
+        entry = probe_terminal(name)
+        if entry:
+            out[name] = {**entry, "source": "discovered from your environment"}
+    return out
+
+
+def load_terminals(discover: bool = False) -> dict:
+    """Every terminal entry known here, in three layers.
+
+    The user's file, then the built-in table, then -- when asked -- whatever
+    the environment says is hosting this process and can be driven from its
+    own --help. Same shape and the same precedence as `partner-providers.json`:
+    an entry in the user's file replaces the built-in of that name, a new name
+    is simply added, and repo-level beats home-level. Between them, "which
+    terminals exist" is never this file's decision -- and the table still ends
+    with a platform default, so an unrecognised environment gets a tab rather
+    than an apology.
+    """
+    out = {k: dict(v) for k, v in TERMINALS.items()}
+    files = list(TERMINAL_FILES)
+    try:
+        files.append(state_dir() / "terminals.json")
+    except OSError:
+        pass
+    user: dict = {}
+    for f in files:
+        try:
+            if f.is_file():
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, dict) and v.get("open"):
+                            user[k] = {**v, "source": str(f)}
+        except (OSError, ValueError):
+            continue
+    # The user's entries lead: a terminal somebody described by hand is a
+    # deliberate choice and should win over this table's detection order.
+    merged = {k: {**out.get(k, {}), **v} for k, v in user.items()}
+    for k, v in out.items():
+        merged.setdefault(k, v)
+    if discover:
+        for k, v in discover_terminals(merged).items():
+            merged.setdefault(k, v)
+    return merged
+
+
+def terminal_bin(spec: dict) -> str | None:
+    """The binary this entry drives, if it is here at all."""
+    name = spec.get("bin") or (spec["open"].split() or [""])[0]
+    found = shutil.which(name)
+    if found:
+        return found
+    if os.name == "nt" and not name.lower().endswith(".exe"):
+        found = shutil.which(name + ".exe")
+        if found:
+            return found
+    # Some hosts point at their own binary through the environment rather than
+    # putting it on an agent's PATH.
+    alt = os.environ.get(spec.get("bin_env") or "", "")
+    if alt and Path(alt).exists():
+        return alt
+    return None
+
+
+def terminal_available(spec: dict) -> tuple[bool, str]:
+    """Can this entry open a tab here, and if not, what is missing."""
+    plat = spec.get("platform")
+    if plat == "nt" and os.name != "nt":
+        return False, "Windows only"
+    if plat == "darwin" and sys.platform != "darwin":
+        return False, "macOS only"
+    if plat in ("linux", "posix") and os.name == "nt":
+        return False, "POSIX only"
+    env = spec.get("env") or []
+    if env and not any(os.environ.get(e) for e in env):
+        return False, f"not running inside it ({' / '.join(env)} unset)"
+    p = spec.get("path")
+    if p and not Path(p).exists():
+        return False, f"{p} not present"
+    if not terminal_bin(spec):
+        return False, f"{spec.get('bin') or 'binary'} not on PATH"
+    return True, "available"
+
+
+def terminal_order(prefer: str | None = None,
+                   discover: bool = False) -> list[tuple[str, dict]]:
+    """Entries in the order they should be tried.
+
+    `prefer` -- `--terminal <name>`, or PARTNER_TERMINAL -- moves one to the
+    front. Nothing is removed by it: a preference that turns out not to be
+    usable falls through to detection rather than failing the spawn.
+    """
+    specs = load_terminals(discover)
+    want = prefer or os.environ.get("PARTNER_TERMINAL") or ""
+    here = " ".join(os.environ.get(k, "") for k in
+                    ("TERM_PROGRAM", "TERM", "TERMINAL_EMULATOR")).lower()
+
+    def rank(item: tuple[str, dict]) -> tuple[int, int, int]:
+        name, spec = item
+        inside = any(os.environ.get(e) for e in (spec.get("env") or []))
+        looks = any(h.lower() in here for h in (spec.get("term") or []))
+        # Asked for > a host we are inside > the terminal on screen > the table.
+        return (0 if name == want else 1,
+                0 if inside else 1,
+                0 if looks else 1)
+
+    # Stable, so the table order breaks every tie.
+    return sorted(specs.items(), key=rank)
+
+
+def term_argv(template: str, **vals) -> list[str]:
+    """Split a terminal template, then substitute inside each argument.
+
+    Substituting first and splitting after would break on every path with a
+    space in it, and on Windows would let a backslash be read as an escape.
+    """
+    out = []
+    for part in shlex.split(template):
+        for k, v in vals.items():
+            part = part.replace("{" + k + "}", str(v))
+        if part:
+            out.append(part)
+    return out
+
+
+def shell_run(runner: Path) -> str:
+    """One string that runs the runner script through a shell -- what the
+    terminals that take a command as a single argument need."""
+    return f'cmd /c "{runner}"' if os.name == "nt" else f'bash "{runner}"'
+
+
+def _dig(data, dotted: str, want: type = str):
+    """Walk a dotted path through parsed JSON. An empty path is the document."""
+    for key in filter(None, dotted.split(".")):
+        if not isinstance(data, dict):
+            return want()
+        data = data.get(key)
+    return data if isinstance(data, want) else want()
+
+
+def open_in(name: str, spec: dict, title: str, runner: Path, cwd: Path) -> dict:
+    """Open one tab through one terminal entry. {} when it did not work.
+
+    An entry with a `handle` is run synchronously, because the id it prints is
+    the only way to type into that tab later; everything else is fire and
+    forget, so a terminal that never exits does not block the spawn.
+    """
+    binary = terminal_bin(spec)
+    if not binary:
+        return {}
+    vals = {"bin": binary, "run": str(runner), "cwd": str(cwd),
+            "title": title, "shell": shell_run(runner)}
+    argv = term_argv(spec["open"], **vals)
+    if not argv:
+        return {}
+    label = spec.get("label") or f"{name} tab"
+    handle_spec = spec.get("handle") or ""
+    try:
+        if handle_spec:
+            r = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=60)
+            if r.returncode != 0:
+                return {}
+            handle = ""
+            if handle_spec.startswith("json:"):
+                try:
+                    doc = json.loads(r.stdout)
+                    if doc.get("ok") is False:
+                        return {}
+                    handle = _dig(doc, handle_spec[5:])
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+            elif r.stdout.strip():
+                handle = r.stdout.strip().splitlines()[0].strip()
+            return {"label": label, "kind": name, "handle": handle,
+                    "title": title}
+        subprocess.Popen(argv, cwd=str(cwd),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        return {}
+    return {"label": label, "kind": name, "handle": "", "title": title}
+
+
+def terminal_choice(prefer: str | None = None,
+                    discover: bool = True) -> tuple[str, dict, str] | None:
+    """The terminal a spawn would use right now: (name, spec, label)."""
+    for name, spec in terminal_order(prefer, discover):
+        if terminal_available(spec)[0]:
+            return name, spec, spec.get("label") or f"{name} tab"
+    return None
+
+
+def open_tab(title: str, runner: Path, cwd: Path,
+             prefer: str | None = None) -> dict:
+    """Open a tab in the first terminal that can take one.
+
+    Returns {label, kind, handle, title} -- stored on the roster entry, because
+    waking a silent agent later has to know which terminal owns its tab, and
+    that is not recoverable after the fact.
+    """
+    # Discovery takes part in the *choice*, not just as a last resort: a user
+    # sitting in a terminal nothing here has heard of should get the partner
+    # beside them, not in whichever other terminal happens to be installed.
+    # It costs nothing in the common case -- `discover_terminals` skips any
+    # host already described, and probe results are cached per binary -- so the
+    # one subprocess is paid only when the host really is unknown.
+    for name, spec in terminal_order(prefer, discover=True):
+        ok, _ = terminal_available(spec)
+        if not ok:
+            continue
+        tab = open_in(name, spec, title, runner, cwd)
+        if tab:
+            return tab
+    return {}
+
 
 def write_runner(pdir: Path, argv: list[str], cwd: Path) -> Path:
     # Export PARTNER_ID into the tab's own environment, not just the wrappers'.
@@ -1747,153 +2275,6 @@ def write_runner(pdir: Path, argv: list[str], cwd: Path) -> Path:
     return r
 
 
-def _has(binary: str) -> bool:
-    return shutil.which(binary) is not None
-
-
-def orca_bin() -> str | None:
-    """The Orca CLI, but only when this session is running inside Orca.
-
-    Orca manages its own terminal tabs, so opening a partner in a detached
-    OS terminal there would strand it outside the workspace the user is
-    actually looking at. The env markers are set by Orca for processes it
-    launches; without them we are somewhere else and take the normal path.
-    """
-    if not (os.environ.get("ORCA_WORKTREE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE")
-            or os.environ.get("ORCA_TAB_ID")):
-        return None
-    found = shutil.which("orca")
-    if found:
-        return found
-    # Orca points at its own binary here; use it if PATH does not carry it.
-    fallback = os.environ.get("ORCA_CODEX_LAUNCH_PREFLIGHT", "")
-    return fallback if fallback and Path(fallback).exists() else None
-
-
-def open_orca_tab(title: str, runner: Path, cwd: Path) -> dict:
-    """Open the partner as a tab in the current Orca worktree.
-
-    Returns the tab's handle alongside the label: Orca can type into a tab it
-    created (`terminal send`), which is the only way to wake an agent whose CLI
-    has no Stop hook and has stopped looping. Discarding the handle here would
-    mean re-deriving it from a title match later, which breaks the moment a tab
-    is renamed.
-    """
-    orca = orca_bin()
-    if not orca:
-        return {}
-    cmd = (f'cmd /c "{runner}"' if os.name == "nt" else f'bash "{runner}"')
-    argv = [orca, "terminal", "create", "--worktree", f"path:{cwd}",
-            "--title", title, "--command", cmd, "--json"]
-    try:
-        r = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        return {}
-    if r.returncode != 0:
-        return {}
-    handle = ""
-    try:
-        out = json.loads(r.stdout)
-        if out.get("ok") is False:
-            return {}
-        handle = str((out.get("result", {}).get("terminal", {}) or {}).get("handle", ""))
-    except (json.JSONDecodeError, AttributeError):
-        pass
-    return {"label": "Orca tab", "kind": "orca", "handle": handle}
-
-
-def tab_command(title: str, runner: Path,
-                cwd: Path) -> tuple[list[str], str, str] | None:
-    """Pick the best available way to open a new tab.
-
-    Returns (argv, label, kind). `kind` is what `nudge` dispatches on later --
-    the terminals that can be typed into from outside are exactly the ones with
-    a control CLI, and which one opened the tab is not recoverable afterwards.
-    """
-    r, c = str(runner), str(cwd)
-
-    # Multiplexers first: if the user is already in one, a real tab is free.
-    if os.environ.get("TMUX") and _has("tmux"):
-        return (["tmux", "new-window", "-n", title, "-c", c, f"bash {r}"],
-                "tmux tab", "tmux")
-    if os.environ.get("ZELLIJ") and _has("zellij"):
-        return (["zellij", "run", "--name", title, "--cwd", c, "--", "bash", r],
-                "zellij pane", "zellij")
-
-    # Cross-platform terminals with a control CLI.
-    if _has("wezterm"):
-        return (["wezterm", "cli", "spawn", "--cwd", c, "--", "bash", r],
-                "WezTerm tab", "wezterm")
-    if _has("kitty") and os.environ.get("KITTY_LISTEN_ON"):
-        return (["kitty", "@", "launch", "--type=tab", "--tab-title", title,
-                 "--cwd", c, "bash", r], "kitty tab", "kitty")
-
-    if os.name == "nt":
-        if _has("wt.exe") or _has("wt"):
-            return ([shutil.which("wt.exe") or "wt", "-w", "0", "nt",
-                     "--title", title, "-d", c, "cmd.exe", "/k", r],
-                    "Windows Terminal tab", "other")
-        return (["cmd.exe", "/c", "start", title, "cmd.exe", "/k", r],
-                "cmd window", "other")
-
-    if sys.platform == "darwin":
-        if Path("/Applications/iTerm.app").exists():
-            script = ('tell application "iTerm2" to if it is running then' + NL
-                      + '  tell current window to create tab with default profile '
-                      + f'command "bash {r}"' + NL + 'end if')
-            return ["osascript", "-e", script], "iTerm2 tab", "other"
-        return (["osascript", "-e",
-                 f'tell application "Terminal" to do script "bash {r}"',
-                 "-e", 'tell application "Terminal" to activate'],
-                "Terminal.app tab", "other")
-
-    for argv, label in (
-        (["gnome-terminal", "--tab", f"--title={title}", "--", "bash", r], "GNOME Terminal tab"),
-        (["konsole", "--new-tab", "-e", "bash", r], "Konsole tab"),
-        (["xfce4-terminal", "--tab", f"--title={title}", "-e", f"bash {r}"], "Xfce Terminal tab"),
-        (["terminator", "-e", f"bash {r}"], "Terminator window"),
-        (["alacritty", "-e", "bash", r], "Alacritty window"),
-        (["xterm", "-T", title, "-e", "bash", r], "xterm window"),
-    ):
-        if _has(argv[0]):
-            return argv, label, "other"
-    return None
-
-
-def open_tab(title: str, runner: Path, cwd: Path) -> dict:
-    """Open a tab and describe it: {label, kind, handle, title}.
-
-    The description is stored on the roster entry because waking a silent agent
-    later needs to know which terminal owns its tab.
-    """
-    # Orca first: inside it, a detached OS terminal would put the partner
-    # outside the workspace the user is looking at.
-    tab = open_orca_tab(title, runner, cwd)
-    if tab:
-        return {**tab, "title": title}
-    picked = tab_command(title, runner, cwd)
-    if not picked:
-        return {}
-    argv, label, kind = picked
-    handle = ""
-    try:
-        if kind == "wezterm":
-            # `wezterm cli spawn` prints the new pane id, and `send-text`
-            # addresses panes by id -- so it is captured rather than discarded.
-            r = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=60)
-            if r.returncode != 0:
-                return {}
-            handle = r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ""
-        else:
-            subprocess.Popen(argv, cwd=str(cwd),
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired, IndexError):
-        return {}
-    return {"label": label, "kind": kind, "handle": handle, "title": title}
-
-
 # --------------------------------------------------------------------------
 # waking an agent that stopped listening
 # --------------------------------------------------------------------------
@@ -1908,49 +2289,70 @@ def open_tab(title: str, runner: Path, cwd: Path) -> dict:
 # would. That works whatever is running in it. Every terminal with a control CLI
 # can do it, and `spawn` records which one owns each tab.
 
-def _orca_handle_for(title: str) -> str:
-    """Find a live Orca tab by title, for agents spawned before handles were
-    recorded (or whose tab was recreated)."""
-    orca = orca_bin()
-    if not orca:
+def find_handle(spec: dict, title: str) -> str:
+    """Recover a tab's id from the terminal itself, by title.
+
+    Needed for an agent spawned before its handle was recorded, and for one
+    whose tab was recreated. `list` in the spec says how to ask -- without it
+    there is nothing to ask, and the nudge falls back to the manual path.
+    """
+    tmpl, dig = spec.get("list") or "", spec.get("list_handle") or ""
+    binary = terminal_bin(spec)
+    if not (tmpl and dig and binary):
         return ""
+    argv = term_argv(tmpl, bin=binary, title=title)
     try:
-        r = subprocess.run([orca, "terminal", "list", "--json"],
-                           capture_output=True, text=True, encoding="utf-8",
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=30)
         if r.returncode != 0:
             return ""
-        res = json.loads(r.stdout).get("result", {})
-        for t in (res.get("terminals") or res.get("items") or []):
-            if str(t.get("title", "")) == title:
-                return str(t.get("handle", ""))
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, AttributeError):
-        pass
+        doc = json.loads(r.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return ""
+    # "result.terminals[].handle@title" -- a list to walk, the field to return,
+    # and the field to match the title against.
+    path, _, fields = dig.partition("[].")
+    field, _, key = fields.partition("@")
+    items = _dig(doc, path, want=list) or []
+    for it in items:
+        if isinstance(it, dict) and str(it.get(key or "title", "")) == title:
+            return str(it.get(field, ""))
     return ""
 
 
 def nudge_command(entry: dict, pid: str, text: str) -> list[str] | None:
-    """The argv that types `text` plus Enter into this agent's tab."""
-    kind = entry.get("tab_kind") or ""
-    handle = entry.get("tab_handle") or ""
-    title = entry.get("tab_title") or f"partner:{pid}"
+    """The argv that types `text` plus Enter into this agent's tab.
 
-    if kind == "orca" or (not kind and orca_bin()):
-        orca = orca_bin()
-        handle = handle or _orca_handle_for(title)
-        if orca and handle:
-            return [orca, "terminal", "send", "--terminal", handle,
-                    "--text", text, "--enter"]
+    Which terminal owns the tab was recorded at spawn, and the terminal entry
+    itself says how to type into one -- so a terminal the user described in
+    their own file can be woken exactly like a built-in, and one that cannot be
+    typed into says so by having no `send` rather than by being special-cased
+    here.
+    """
+    title = entry.get("tab_title") or f"partner:{pid}"
+    specs = load_terminals(discover=True)
+    kind = entry.get("tab_kind") or ""
+    spec = specs.get(kind)
+    if not spec:
+        # No record of the terminal (an older roster, or a hand-started tab):
+        # the one we are inside now is the best guess available.
+        pick = next(((n, s) for n, s in terminal_order()
+                     if s.get("send") and terminal_available(s)[0]), None)
+        if not pick:
+            return None
+        kind, spec = pick
+    if not spec.get("send"):
         return None
-    if kind == "tmux" and _has("tmux"):
-        return ["tmux", "send-keys", "-t", title, text, "Enter"]
-    if kind == "wezterm" and _has("wezterm") and handle:
-        return ["wezterm", "cli", "send-text", "--pane-id", handle,
-                "--no-paste", text + NL]
-    if kind == "kitty" and _has("kitty"):
-        return ["kitty", "@", "send-text", "--match", f"title:{title}",
-                text + NL]
-    return None
+    binary = terminal_bin(spec)
+    if not binary:
+        return None
+    handle = entry.get("tab_handle") or ""
+    if "{handle}" in spec["send"] and not handle:
+        handle = find_handle(spec, title)
+        if not handle:
+            return None
+    return term_argv(spec["send"], bin=binary, handle=handle, title=title,
+                     text=text, text_nl=text + NL)
 
 
 def nudge_text(pid: str, why: str) -> str:
@@ -1994,10 +2396,11 @@ def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
     argv = nudge_command(entry, pid, nudge_text(pid, why))
     if not argv:
         manual = entry.get("runner") or f"{sd / pid}/run.sh"
+        where = entry.get("tab") or "its window"
         return {"id": pid, "nudged": False,
-                "why": f"no way to type into a {entry.get('tab') or 'detached'} "
-                       f"tab -- type \"continue\" in {pid}'s tab yourself, or "
-                       f"restart it with: {manual}"}
+                "why": f"{where} cannot be typed into from outside (`terminals` "
+                       f"says which can) -- type \"continue\" in {pid}'s tab "
+                       f"yourself, or restart it with: {manual}"}
     try:
         r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=30)
@@ -2471,7 +2874,9 @@ def cmd_spawn(args) -> int:
 
     argv = build_tui(entry, boot)
     runner = write_runner(pdir, argv, root)
-    tab = {} if args.no_tab else open_tab(f"partner:{pid}", runner, root)
+    tab = ({} if args.no_tab
+           else open_tab(f"partner:{pid}", runner, root,
+                         getattr(args, "terminal", None)))
     label = tab.get("label", "")
     entry["tab"] = label
     # Kept so a silent agent can be woken later by typing into its own tab.
@@ -2657,7 +3062,8 @@ def cmd_sessions(args) -> int:
 
 
 def relaunch(sd: Path, pid: str, roster: dict, root: Path, script: Path,
-             no_tab: bool = False) -> tuple[str, Path]:
+             no_tab: bool = False,
+             terminal: str | None = None) -> tuple[str, Path]:
     """Start an agent from its roster entry rather than from CLI arguments.
 
     Resuming has to rebuild agents it did not create, so the launch path takes
@@ -2671,7 +3077,7 @@ def relaunch(sd: Path, pid: str, roster: dict, root: Path, script: Path,
     boot = boot_prompt(seed_f, baton_of(roster))
     argv = build_tui(entry, boot)
     runner = write_runner(pdir, argv, root)
-    tab = {} if no_tab else open_tab(f"partner:{pid}", runner, root)
+    tab = {} if no_tab else open_tab(f"partner:{pid}", runner, root, terminal)
     label = tab.get("label", "")
     entry["tab"] = label
     entry["tab_kind"] = tab.get("kind", "")
@@ -2736,7 +3142,8 @@ def cmd_resume(args) -> int:
         if pid == me:
             continue
         entry.setdefault("kind", "tab")
-        label, _ = relaunch(sd, pid, roster, root, script, args.no_tab)
+        label, _ = relaunch(sd, pid, roster, root, script, args.no_tab,
+                            getattr(args, "terminal", None))
         started.append(f"{pid} ({entry.get('provider')}"
                        f"{'/' + entry['model'] if entry.get('model') else ''})"
                        f"{' -> ' + label if label else ''}")
@@ -2846,32 +3253,41 @@ def _age_seconds(stamp: str | None) -> float | None:
     return (datetime.now(timezone.utc) - t).total_seconds()
 
 
-def orca_tab_titles() -> set[str] | None:
-    """Titles of live Orca terminals, or None when Orca cannot answer.
+def tab_titles() -> set[str] | None:
+    """Titles of live tabs, or None when no terminal here can say.
 
-    Inside Orca this is better evidence than a heartbeat: it reports the tab
-    itself rather than what the agent last did in it.
+    Where a terminal can list its own tabs, that is better evidence than a
+    heartbeat: it reports the tab itself rather than what the agent last did in
+    it. Which terminals can is a property of the entry (`list` + `list_titles`),
+    so one described in the user's own file corroborates liveness exactly like a
+    built-in, and a terminal that cannot list simply leaves the heartbeat as the
+    only evidence.
     """
-    orca = orca_bin()
-    if not orca:
-        return None
-    try:
-        r = subprocess.run([orca, "terminal", "list", "--json"],
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=30)
-        if r.returncode != 0:
-            return None
-        res = json.loads(r.stdout).get("result", {})
-        terms = res.get("terminals") or res.get("items") or []
-        return {str(t.get("title", "")) for t in terms}
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, AttributeError):
-        return None
+    for _, spec in terminal_order():
+        if not (spec.get("list") and spec.get("list_titles")):
+            continue
+        binary = terminal_bin(spec)
+        if not binary or not terminal_available(spec)[0]:
+            continue
+        try:
+            r = subprocess.run(term_argv(spec["list"], bin=binary, title=""),
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=30)
+            if r.returncode != 0:
+                continue
+            doc = json.loads(r.stdout)
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            continue
+        path, _, field = (spec["list_titles"]).partition("[].")
+        items = _dig(doc, path, want=list) or []
+        return {str(it.get(field, "")) for it in items if isinstance(it, dict)}
+    return None
 
 
 def liveness(sd: Path, roster: dict, window: int = LIVE_WINDOW) -> dict:
     """Classify every agent as live, stale or stopped, and say why."""
     me = me_id(roster)
-    titles = orca_tab_titles()
+    titles = tab_titles()
     out = {}
     for pid, entry in roster.get("partners", {}).items():
         if entry.get("status") == "stopped":
@@ -3253,8 +3669,9 @@ def cmd_providers(args) -> int:
     print(f"Any CLI not listed still works: name it directly "
           f"(`spawn --provider <bin>`, flags read from its --help), or pass the "
           f"exact command with `--provider custom --cmd '<template>'`.")
-    where = "an Orca tab" if orca_bin() else "a new terminal tab"
-    print(f"Partners will open in {where}.")
+    pick = terminal_choice()
+    where = pick[2] if pick else "no terminal this script can drive -- it will "                                  "print the command to start each partner"
+    print(f"Partners will open in: {where}. `terminals` lists the alternatives.")
     print("Run `models --provider <name>` for what to point one at.")
     return 0
 
@@ -3384,6 +3801,53 @@ def cmd_probe(args) -> int:
               f"that command is wrong, correct it with:{NL}"
               f"  spawn --provider custom --cmd '<the right command with "
               f"{{prompt}}>'")
+    return 0
+
+
+def cmd_terminals(args) -> int:
+    """What can open a partner's tab here, in the order it would be tried.
+
+    The counterpart to `providers`: same question one level down, and the same
+    answer -- what this machine actually has, not what the script was written
+    knowing about. Whether an agent can be woken later is part of it, since
+    that depends entirely on the terminal.
+    """
+    items = terminal_order(args.prefer, discover=not args.no_probe)
+    rows, first = [], None
+    for name, spec in items:
+        ok, why = terminal_available(spec)
+        row = {"name": name, "available": ok, "why": why,
+               "label": spec.get("label") or f"{name} tab",
+               "can_type": bool(spec.get("send")),
+               "source": spec.get("source", "built-in")}
+        if ok and first is None:
+            first = row
+        rows.append(row)
+    data = {"terminals": rows, "chosen": first,
+            "prefer": args.prefer or os.environ.get("PARTNER_TERMINAL") or ""}
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+
+    for r in rows:
+        mark = "->" if r is first else "  "
+        state = "available" if r["available"] else r["why"][:32]
+        typing = "can be typed into" if r["can_type"] else "cannot be typed into"
+        origin = "" if r["source"] == "built-in" else f"   [{r['source']}]"
+        print(f"{mark} {r['name']:16} {state:34} {typing}{origin}")
+    if first:
+        print(f"{NL}A partner spawned now opens in: {first['label']}.")
+        if not first["can_type"]:
+            print("This terminal cannot be typed into from outside, so an agent "
+                  "that stops looping has to be nudged by hand -- `nudge` will "
+                  "print the command that restarts it.")
+    else:
+        print(f"{NL}Nothing here can open a tab. `spawn` still registers the "
+              f"partner and prints the command to start it yourself.")
+    print(f"{NL}Force one with `--terminal <name>` or PARTNER_TERMINAL. Add or "
+          f"correct one in ~/.claude/partner-terminals.json (or "
+          f".partner/terminals.json for this repo) -- an entry needs `open`, "
+          f"and `send` if it can be typed into.")
     return 0
 
 
@@ -3544,6 +4008,9 @@ def main() -> int:
     sp.add_argument("--cmd", default=None, help="command template for --provider custom")
     sp.add_argument("--context", default=None, help="handoff text, or path to a file")
     sp.add_argument("--no-tab", action="store_true")
+    sp.add_argument("--terminal", default=None,
+                    help="open the tab in this terminal (see `terminals`); "
+                         "default is whatever detection picks")
     sp.add_argument("--replace", action="store_true")
     sp.add_argument("--force", action="store_true",
                     help="use a model the known list has not caught up with")
@@ -3573,6 +4040,7 @@ def main() -> int:
     rs.add_argument("--session", default=None,
                     help="archived session id; omit to continue the current one")
     rs.add_argument("--no-tab", action="store_true")
+    rs.add_argument("--terminal", default=None, help="see `terminals`")
     rs.set_defaults(fn=cmd_resume)
 
     ck = sub.add_parser("check", help="validate a config without starting anything")
@@ -3640,6 +4108,13 @@ def main() -> int:
     st.add_argument("--id", default=None)
     st.add_argument("--all", action="store_true")
     st.set_defaults(fn=cmd_stop)
+
+    tm = sub.add_parser("terminals", help="what can open a partner's tab here")
+    tm.add_argument("--prefer", default=None,
+                    help="rank this entry first, as --terminal would")
+    tm.add_argument("--no-probe", action="store_true",
+                    help="do not probe the terminal hosting this session")
+    tm.set_defaults(fn=cmd_terminals)
 
     pd = sub.add_parser("pending", help="messages you still owe a reply to")
     pd.add_argument("--for", dest="who", default=None)

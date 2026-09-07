@@ -102,7 +102,7 @@ Past sessions live alongside, each a complete copy of the above:
 `roster.json` records `status: "running"` because nothing has told it otherwise. Close a tab and the claim survives, so it cannot decide whether to add a partner or start over. Liveness is evidence instead:
 
 - **Heartbeat.** Every agent writes `<id>/lastseen` whenever it runs `wait`, `read`, `send` or `claim`. Acting is what proves it is alive, and `wait` returns within its timeout (90s by default) and loops, so a working agent stamps at least every couple of minutes. Default window is 360s.
-- **Orca tab list.** Inside Orca, `orca terminal list` reports whether a tab titled `partner:<id>` still exists.
+- **Tab list.** Where the terminal can enumerate its own tabs (`list` + `list_titles` on its entry), that reports whether a tab titled `partner:<id>` still exists — better evidence than a heartbeat, since it describes the tab rather than what the agent last did in it. Terminals that cannot enumerate leave the heartbeat as the only evidence, and some rename tabs from the running process, so a missing title is treated as weak evidence and only ever downgrades an agent that has *also* stopped checking in.
 
 A **fresh heartbeat outranks the tab list**. An agent that ran a command seconds ago is alive regardless of what the tab list says — checking tabs first would call it dead whenever the tab was renamed, launched with `--no-tab`, or started outside Orca. The tab check only downgrades an agent that has *not* checked in recently.
 
@@ -219,7 +219,7 @@ A Stop hook only exists inside Claude Code. Any other CLI may or may not have an
 .partner/p.sh nudge              # everyone with no `wait` in flight
 ```
 
-`spawn` records how each tab was opened (`tab_kind`, `tab_handle`, `tab_title` on the roster entry) because the terminal that owns a tab is not recoverable afterwards. Orca tabs are typed into with `orca terminal send --terminal <handle> --text … --enter`; tmux, WezTerm and kitty have equivalents. A detached OS window (Windows Terminal, Terminal.app, GNOME Terminal) cannot be typed into, so `nudge` reports that and prints the command that restarts the agent instead.
+`spawn` records how each tab was opened (`tab_kind`, `tab_handle`, `tab_title` on the roster entry) because the terminal that owns a tab is not recoverable afterwards. *How* to type into one is a property of the terminal entry — its `send` template — so this works for a terminal the user described in their own file exactly as for a built-in, and a terminal that cannot be typed into is expressed by having no `send` rather than by being special-cased in code. Where the handle was never recorded, `list_handle` recovers it by title. See `references/terminals.md`.
 
 Where it fires:
 

@@ -6,7 +6,7 @@ A public collection of Claude Code plugins for developer workflows. Install any 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 0.16.0 |
+| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 0.17.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.6.1 |
 
 ## Installing a Plugin
@@ -32,7 +32,7 @@ Runs several AI agents as equal partners, each in its own terminal tab, so decis
 
 - Launches a partner on **any agent CLI on your machine** — found by scanning PATH and the per-user install directories, then driven from its own `--help` if there is no built-in recipe; or name the exact command with a one-line `--cmd` template
 - **Offers models it found, not models it remembers** — read from the CLI's own model list, your config for it, its help and its program files, grouped by how much each source proves, and checked against the web when the local answer looks dated
-- Opens a real tab on **Windows, macOS, and Linux** (Windows Terminal, iTerm2, Terminal.app, GNOME Terminal, Konsole, WezTerm, kitty, tmux, zellij), and prints a manual command when there is no terminal
+- Opens a real tab on **Windows, macOS, and Linux** (Windows Terminal, iTerm2, Terminal.app, GNOME Terminal, Konsole, WezTerm, kitty, Ghostty, foot, Rio, Alacritty, tmux, zellij, xterm), and prints a manual command when there is no terminal — and a terminal it has never heard of works too — whatever hosts your session names itself in the environment and is driven from flags read out of its own `--help`, with a per-OS default terminal behind that so a spawn always lands somewhere; `terminals` lists what can open a tab and which wins, `--terminal <name>` forces one, and a JSON entry adds or fixes any terminal without touching the plugin
 - Every agent is a **full interactive session** — interrupt any tab and type at that partner directly; it answers you, then resumes debating
 - Starts partners with **permission prompting relaxed** (`--auto ask|edits|full`) so nobody is answering dialogs in three tabs at once
 - **Genuinely symmetric**: the session you start from registers itself as an ordinary partner with the same config, the same briefing and its own identity — begin from any tab, and only that partner writes

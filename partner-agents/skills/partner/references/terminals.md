@@ -1,10 +1,112 @@
-# Terminal tabs
+# Terminals
 
 `spawn` opens each partner in its own terminal tab. The tab runs the provider's normal interactive interface, so the user can read the debate as it happens and type at that agent directly at any moment.
 
+## Nothing here is a fixed list either
+
+Terminals are resolved the way providers are — three layers, none of which is a table of blessed names:
+
+| Layer | What it supplies | Where it lives |
+|-------|------------------|----------------|
+| **Entry** | templates checked by hand | `TERMINALS` in `scripts/partner.py` |
+| **Your config** | terminals you describe or correct | `~/.claude/partner-terminals.json`, `.partner/terminals.json` |
+| **Discovery** | the terminal hosting this session, driven from its own `--help` | the environment and the binary itself |
+| **Platform default** | whatever the system itself calls a terminal, so nothing depends on the three above succeeding | `cmd.exe`, `open -a Terminal`, `x-terminal-emulator`, `xdg-terminal-exec` |
+
+**A terminal nobody here has heard of still gets used.** Every emulator announces itself in the environment — `TERM_PROGRAM`, `TERM`, or a marker of its own — so *what am I running in* is a question the machine answers. Whatever that names is then probed like an unknown agent CLI: find the flag that runs a command, the flag that sets the directory, the flag that sets a title, and build the `open` template from what was actually found. A flag that was not found is not passed.
+
+**And if even that finds nothing, a spawn still opens a tab**, because the table ends with each platform's own default terminal. The manual-command path is the last resort, not the second one.
+
+Discovery is bounded on purpose: only the host terminal is probed, and only when it is not already described, so the usual case costs no subprocesses at all. Results are cached against the binary, so the first unknown terminal costs one probe and every spawn after it costs none.
+
+```bash
+python partner.py terminals              # what can open a tab here, in order
+python partner.py terminals --prefer kitty
+```
+
+The listing says, for every entry: whether it is usable here (and if not, what is missing), whether an agent in it **can be typed into** later, which layer it came from, and which one a spawn would pick right now. `--no-probe` skips discovery.
+
+```
+-> mytermx          available                          cannot be typed into   [discovered from your environment]
+   orca             not running inside it (ORCA_WOR   can be typed into
+   tmux             not running inside it (TMUX unse   can be typed into
+   wezterm          wezterm not on PATH                can be typed into
+   wt               available                          cannot be typed into
+   iterm            macOS only                         cannot be typed into
+```
+
+That first row is a terminal this plugin has never heard of: named by `TERM_PROGRAM`, found on PATH, and driven from flags read out of its own help.
+
+## What an entry looks like
+
+Three keys carry all of it, and only the first is required:
+
+| Key | What it is |
+|-----|------------|
+| `open` | the command that opens a tab running one script |
+| `send` | the command that types a line into that tab — omit it if the terminal cannot be typed into |
+| `handle` | where the open command reports an id, when `send` needs one |
+
+Templates use the same substitution as a provider `--cmd`: the template is split into arguments **first**, then placeholders are replaced inside each argument. That is what keeps a path with spaces one argument, and stops a Windows backslash being read as an escape.
+
+| Placeholder | Value |
+|-------------|-------|
+| `{bin}` | the resolved binary |
+| `{run}` | the runner script path |
+| `{shell}` | the command that runs the runner through a shell (`bash "…"` / `cmd /c "…"`) |
+| `{cwd}` | the repo root |
+| `{title}` | `partner:<id>` |
+| `{text}` / `{text_nl}` | the line to type, plain or newline-terminated (`send` only) |
+| `{handle}` | the id from `handle` or `list_handle` |
+
+Detection is per entry, not a chain of ifs in code:
+
+| Key | Meaning |
+|-----|---------|
+| `bin` | binary that must be on PATH (defaults to the first word of `open`) |
+| `bin_env` | env var holding a path to the binary, when a host does not put it on PATH |
+| `env` | any one of these env vars set → we are running **inside** this terminal |
+| `path` | a path that must exist (an app bundle, say) |
+| `platform` | `nt`, `darwin`, `linux` |
+| `term` | strings matched against `$TERM` / `$TERM_PROGRAM` → this is the terminal on screen |
+| `list` + `list_handle` / `list_titles` | how to enumerate live tabs, for recovering a handle by title and for corroborating liveness |
+
+## Selection order
+
+1. **`--terminal <name>`**, or `PARTNER_TERMINAL` — an explicit choice comes first. It is a preference, not a constraint: if that terminal turns out to be unusable, detection continues rather than failing the spawn.
+   Discovery takes part in this ordering rather than acting as a fallback after it, because a user sitting in an unrecognised terminal should get the partner beside them, not in whichever other terminal happens to be installed.
+2. **A host we are already inside** (`env` matched) — a multiplexer or a workspace app. A tab inside the window the user already has costs nothing, and inside a workspace app a detached OS window would strand the partner outside the workspace they are looking at.
+3. **The terminal on screen** (`term` matched) — the partner appears where the user is actually looking.
+4. **The table order** — terminals with a control CLI first, since those are also the ones that can be typed into; then whatever else can open a window.
+
+Built-in entries, in table order: `orca`, `tmux`, `zellij`, `wezterm`, `kitty`, `ghostty`, `foot`, `rio`, `wt`, `cmd`, `iterm`, `apple-terminal`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `terminator`, `alacritty`, `xterm`, then the platform defaults `x-terminal-emulator`, `xdg-terminal-exec` and `macos-open`. Any of them can be corrected or replaced by a user entry of the same name — which is the intended fix when a terminal changes its flags, rather than waiting for this plugin to catch up.
+
+## Adding or fixing one
+
+`~/.claude/partner-terminals.json`, or `.partner/terminals.json` for a single repo (repo wins):
+
+```json
+{
+  "ghostty": {
+    "bin": "ghostty",
+    "term": ["ghostty"],
+    "open": "{bin} +new-window -e bash {run}",
+    "label": "Ghostty window"
+  },
+  "mux": {
+    "env": ["MUX_SESSION"],
+    "open": "{bin} split --title {title} --cwd {cwd} -- {shell}",
+    "send": "{bin} type --pane {title} {text_nl}",
+    "label": "mux pane"
+  }
+}
+```
+
+An entry that names an existing key replaces that built-in; a new key is added. Entries from the user's file are ranked ahead of the built-in table, because a terminal somebody described by hand is a deliberate choice.
+
 ## The runner-script indirection
 
-Quoting a nested agent command through `wt.exe`, `osascript` and `gnome-terminal` is where cross-platform launchers normally break — each has its own quoting rules, and `wt` additionally treats `;` as a command separator.
+Quoting a nested agent command through `wt.exe`, `osascript` and `gnome-terminal` is where cross-platform launchers normally break — each has its own rules, and `wt` additionally treats `;` as a command separator.
 
 So the real command is never passed through the terminal at all. `spawn` writes it into a per-partner runner script:
 
@@ -13,53 +115,21 @@ So the real command is never passed through the terminal at all. `spawn` writes 
 .partner/<id>/run.sh     # macOS / Linux
 ```
 
-Every terminal then only has to run one plain file path with no arguments. Adding a new terminal means adding one line, and no escaping is involved.
+Every terminal then only has to run one plain file path with no arguments — which is also why a new entry is one line of template rather than an escaping exercise.
 
-## Selection order
+## Typing into a tab that has gone quiet
 
-The first available option wins.
+A tab agent whose CLI ended its turn cannot be reached from inside the system — nothing re-invokes it, and only Claude Code has a Stop hook. The recovery is to type into its tab the way the human would, and that works whatever is running in it.
 
-**0. Orca** — checked before everything else. When this session is running inside Orca, a detached OS terminal would put the partner outside the workspace the user is actually looking at, so the tab has to be created by Orca itself:
+`spawn` records which terminal owns each tab (`tab_kind`, `tab_handle`, `tab_title` on the roster entry), because the owning terminal is not recoverable after the fact. `nudge` then reads that entry's `send` template. A terminal with no `send` reports that it cannot be typed into and prints the command that restarts the agent instead — relay it.
 
-```bash
-orca terminal create --worktree path:<repo> --title partner:<id> --command "<runner>" --json
-```
+When the handle was never recorded (an older roster, a recreated tab), `list_handle` recovers it by title. That is best-effort: some terminals let the running process rename its own tabs, in which case the handle recorded at spawn is the only reliable id.
 
-Detection is by the environment Orca sets for processes it launches — `ORCA_WORKTREE_ID`, `ORCA_TERMINAL_HANDLE` or `ORCA_TAB_ID`. The binary is taken from `orca` on PATH, falling back to the path in `ORCA_CODEX_LAUNCH_PREFLIGHT`. If any of that is missing, or the call fails, the normal selection below continues — Orca is a preference, not a requirement.
-
-The partner lands as a tab in the current worktree, without stealing focus.
-
-**1. Multiplexers** — checked first, because if the user is already inside one, a real tab costs nothing and stays inside their existing window.
-
-| Condition | Command |
-|-----------|---------|
-| `$TMUX` set | `tmux new-window -n <title> -c <cwd> "bash run.sh"` |
-| `$ZELLIJ` set | `zellij run --name <title> --cwd <cwd> -- bash run.sh` |
-
-**2. Terminals with a control CLI** — work identically on all three platforms.
-
-| Condition | Command |
-|-----------|---------|
-| `wezterm` on PATH | `wezterm cli spawn --cwd <cwd> -- bash run.sh` |
-| `kitty` on PATH and `$KITTY_LISTEN_ON` set | `kitty @ launch --type=tab --tab-title <title> --cwd <cwd> bash run.sh` |
-
-`kitty` requires `allow_remote_control yes` in `kitty.conf`; the `$KITTY_LISTEN_ON` check avoids trying when it is off.
-
-**3. Platform defaults**
-
-| Platform | Preferred | Fallback |
-|----------|-----------|----------|
-| Windows | `wt.exe -w 0 nt --title <title> -d <cwd> cmd.exe /k run.cmd` | `cmd.exe /c start` (new window) |
-| macOS | iTerm2 via `osascript`, when `/Applications/iTerm.app` exists | `Terminal.app` via `osascript do script` |
-| Linux | `gnome-terminal --tab` | `konsole --new-tab`, `xfce4-terminal --tab`, `terminator`, `alacritty`, `xterm` |
-
-`wt -w 0` targets the *current* Windows Terminal window, so partners appear as tabs beside the session that spawned them rather than in new windows.
-
-On Linux, only GNOME Terminal, Konsole and Xfce Terminal give real tabs; the rest open separate windows. That is a cosmetic difference — the transcript works the same either way.
+The line that gets typed opens by saying it is an automated wake-up and **not** the human, and tells the agent not to claim the baton. Without that, an agent follows its briefing ("the human addressed me → claim") and takes write permission from whoever is actually working.
 
 ## When no terminal is available
 
-Headless servers, SSH sessions without a display, and containers have no terminal to open. `spawn` still registers the partner and prints the exact command to run:
+This is now genuinely rare — it means the host terminal could not be identified *or* driven, no described terminal is installed, and the platform's own default terminal is absent too. Headless servers, SSH sessions without a display, and containers are where it happens. `spawn` still registers the partner and prints the exact command to run:
 
 ```
 p2 (codex/gpt-5-codex/high, auto=edits) registered, but no terminal could be opened.
@@ -67,35 +137,11 @@ Open a tab yourself and run:
   bash "/repo/.partner/p2/run.sh"
 ```
 
-Relay that command to the user rather than reporting the spawn as failed — everything except the tab worked, and the partner starts participating the moment that command runs.
+Relay that command rather than reporting the spawn as failed — everything except the tab worked, and the partner starts participating the moment that command runs. `--no-tab` requests this deliberately, which is also the right choice when driving partners from a script or a CI job.
 
-`--no-tab` requests this deliberately, which is also the right choice when driving partners from a script or a CI job.
+## Verifying
 
-## Typing into a tab that has gone quiet
-
-A tab agent whose CLI ended its turn cannot be reached from inside the system — nothing re-invokes it. The recovery is to type into its tab the way the human would, so `spawn` records which terminal owns each tab (`tab_kind`, `tab_handle`, `tab_title` on the roster entry): the owning terminal is not recoverable after the fact, and a title match breaks the moment a tab is renamed.
-
-| Tab opened by | How `nudge` types into it |
-|---------------|---------------------------|
-| Orca | `orca terminal send --terminal <handle> --text … --enter` (handle from `terminal create --json`, falling back to a title match in `terminal list`) |
-| tmux | `tmux send-keys -t partner:<id> "…" Enter` |
-| WezTerm | `wezterm cli send-text --pane-id <id> --no-paste` (pane id captured from `cli spawn`) |
-| kitty | `kitty @ send-text --match title:partner:<id>` |
-| everything else | not possible — `nudge` says so and prints the command that restarts the agent |
-
-Windows Terminal, iTerm2, Terminal.app and the Linux desktop terminals have no way to inject input into an existing tab, so partners there recover by hand: the human types in the tab, or the printed `run.cmd`/`run.sh` restarts the agent. Inside Orca, or in tmux/WezTerm/kitty, it is automatic — `send` wakes a recipient that is not listening.
-
-The line that gets typed opens by saying it is an automated wake-up and not the human, and tells the agent not to claim the baton. Without that, an agent follows its briefing ("the human addressed me → claim") and takes write permission from whoever is actually working.
-
-## Verifying a tab
-
-`python partner.py providers` ends with a line saying where partners will open, so it can be checked before spawning anything:
-
-```
-Partners will open in Orca tab.
-```
-
-`python partner.py list` shows the launch method that was actually used per partner:
+`terminals` says where partners will open before anything is spawned. `list` shows the method that was actually used per partner:
 
 ```
   p2       codex    gpt-5-codex   effort=high   auto=edits [running] Orca tab
