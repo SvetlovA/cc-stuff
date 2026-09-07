@@ -43,12 +43,13 @@ from pathlib import Path
 NL = chr(10)
 MSG_DELIM = "<!--/msg-->"
 WAIT_POLL = 3.0
-# Every agent runs `wait` through its CLI's own shell tool, and those tools cap
-# how long a command may run: Claude Code's Bash tool defaults to 120s, codex's
-# exec tool to 10s. A default at or above a cap turns every normal wait into a
-# tool error, which is what teaches an agent that the command is broken. 90s
-# sits under the common cap and still stamps a heartbeat well inside
-# LIVE_WINDOW.
+# Every agent runs `wait` through its CLI's own shell tool, and every such tool
+# caps how long a command may run. A default at or above a cap turns every
+# normal wait into a tool error, which is what teaches an agent that the
+# command is broken. 90s sits under the caps seen so far (120s and 10s on the
+# two CLIs measured) and still stamps a heartbeat well inside LIVE_WINDOW.
+# Agents whose cap is shorter are told to raise it or re-run -- see
+# GENERIC_WAIT_NOTE.
 WAIT_TIMEOUT = 90
 NUDGE_WINDOW = 120         # seconds between nudges to the same silent agent
 # How long after launch a claim is treated as the agent misreading its own boot
@@ -332,9 +333,9 @@ def read_new(sd: Path, who: str) -> tuple[list[dict], int]:
 
     The cursor is deliberately *not* moved here. Advancing it before the caller
     has printed anything means a command killed in between -- which is routine,
-    since codex terminates a command after 10s by default -- consumes the
-    message and loses it: no later `wait` can return it, because the cursor is
-    already past it. `commit_cursor` is called after the output is flushed, so
+    since every CLI caps command runtime and some caps are shorter than a wait
+    -- consumes the message and loses it: no later `wait` can return it,
+    because the cursor is already past it. `commit_cursor` is called after the output is flushed, so
     a killed wait re-delivers instead of swallowing.
     """
     chat = sd / "chat.md"
@@ -462,10 +463,10 @@ def cmd_wait(args) -> int:
     who = args.who or me_id(roster)
     deadline = time.time() + args.timeout
     # Say what this command is doing *before* blocking, and flush it. Every CLI
-    # caps how long a shell command may run -- codex at 10s by default -- and a
-    # capped wait that has printed nothing looks to the agent like a command
-    # that does not work, which is how partners talk themselves out of the loop.
-    # One flushed line means even a killed wait carries its own instructions.
+    # caps how long a shell command may run, and a capped wait that has printed
+    # nothing looks to the agent like a command that does not work, which is how
+    # partners talk themselves out of the loop. One flushed line means even a
+    # killed wait carries its own instructions, whichever CLI killed it.
     if not args.json:
         print(f"[listening as {who} for up to {args.timeout}s. If this command "
               f"is cut short by your tool's own timeout, that is the timeout, "
@@ -645,39 +646,35 @@ EFFORT_HINT = {
 
 AUTO_LEVELS = ("ask", "edits", "full")
 
-# Every agent reaches `wait` through its CLI's own shell tool, and each of those
-# caps command runtime. When the cap is shorter than the wait, the call comes
-# back early -- often with no output at all -- and an agent reading that as a
-# broken command stops looping and goes deaf, which is the single most common
-# way a partner drops out of the debate. So each briefing carries the cap its
-# own CLI imposes and what to do about it.
+# Every agent reaches `wait` through its CLI's own shell tool, and every one of
+# those caps command runtime. When the cap is shorter than the wait, the call
+# comes back early -- often with no output at all -- and an agent reading that
+# as a broken command stops looping and goes deaf, which is the most common way
+# a partner drops out of the debate.
+#
+# The rule is the same for every CLI, so it is stated once, for every CLI, and
+# no partner depends on this file having heard of it. A specific cap is only
+# ever an accelerator on top: a `wait_note` in a recipe or in the user's own
+# providers.json replaces the generic text for that CLI, exactly as `install`
+# and `efforts` do. Nothing here is a gate, and a CLI with no note is fully
+# briefed by the generic one.
 GENERIC_WAIT_NOTE = (
-    "If your shell tool caps how long a command may run, `wait` will come back "
-    "early -- sometimes with no output at all. That is the cap, not a failure "
-    "and not an answer: run `wait` again immediately. Raise the tool's own "
-    "timeout for it if you can.")
-
-WAIT_NOTES = {
-    "codex": (
-        "Your exec tool terminates commands after 10s by default, which is "
-        "shorter than a `wait`. Pass an explicit long runtime every time you "
-        "call it -- `timeout_ms`/`yield_time_ms` of 600000, or start a "
-        "code-mode call with `// @exec: {\"yield_time_ms\": 600000}`. If it "
-        "still returns early or empty, that is the cap expiring, not an "
-        "answer and not an error: run `wait` again immediately. Never treat a "
-        "short or silent `wait` as a reason to end your turn."),
-    "claude": (
-        "Your Bash tool times out at 120s by default, so keep `wait` under "
-        "that (its own default is 90s) or pass a longer tool timeout. A wait "
-        "that returns with nothing is normal -- run it again."),
-    "gemini": (
-        "If your shell tool cuts `wait` short, that is the tool's cap, not an "
-        "answer: run `wait` again immediately rather than ending your turn."),
-}
+    "Find out your own limit once and work with it: if `wait` comes back early "
+    "-- especially with no output at all -- that is your shell tool's own cap "
+    "on how long a command may run, not a failure and not an answer. Raise the "
+    "timeout you pass that tool if it takes one, and either way run `wait` "
+    "again immediately. Never treat a short or silent `wait` as a reason to end "
+    "your turn.")
 
 
 def wait_note(provider: str) -> str:
-    return WAIT_NOTES.get((provider or "").lower(), GENERIC_WAIT_NOTE)
+    """The wait guidance for one CLI: its own, or the rule that holds for all."""
+    if not provider or provider == "custom":
+        return GENERIC_WAIT_NOTE
+    try:
+        return provider_spec(provider).get("wait_note") or GENERIC_WAIT_NOTE
+    except (OSError, ValueError, KeyError, SystemExit):
+        return GENERIC_WAIT_NOTE
 
 
 def _claude_tui(c: dict) -> list[str]:
@@ -744,13 +741,30 @@ RECIPES: dict[str, dict] = {
     "claude": {"bin": "claude", "tui": _claude_tui, "effort": "prompt",
                "efforts": set(EFFORT_HINT),
                "install": "npm install -g @anthropic-ai/claude-code",
-               "login": "claude  (then /login)"},
+               "login": "claude  (then /login)",
+               "wait_note": (
+                   "Your Bash tool times out at 120s by default (600s max), so "
+                   "keep `wait` under that -- its own default is 90s -- or pass "
+                   "a longer tool timeout. A wait that returns with nothing is "
+                   "normal: run it again.")},
     "codex": {"bin": "codex", "tui": _codex_tui, "effort": "flag",
               # A real API field, so only values the API accepts work here.
               # "max" is this skill's own level -- it maps onto "high".
               "efforts": {"low", "medium", "high"},
               "install": "npm install -g @openai/codex",
-              "login": "codex login"},
+              "login": "codex login",
+              # Verified against codex 0.15x: the exec tool's yield_time_ms
+              # defaults to 10s, which is shorter than any useful wait.
+              "wait_note": (
+                   "Your exec tool terminates a command after 10s by default, "
+                   "which is shorter than a `wait`. Pass an explicit long "
+                   "runtime every time you call it -- `timeout_ms` / "
+                   "`yield_time_ms` of 600000, or a first-line "
+                   "`// @exec: {\"yield_time_ms\": 600000}` pragma in code "
+                   "mode. If it still returns early or empty, that is the cap "
+                   "expiring, not an answer and not an error: run `wait` again "
+                   "immediately, and never treat a short or silent wait as a "
+                   "reason to end your turn.")},
     "gemini": {"bin": "gemini", "tui": _gemini_tui, "effort": "prompt",
                "efforts": set(EFFORT_HINT),
                "install": "npm install -g @google/gemini-cli",
@@ -1179,7 +1193,11 @@ def load_overrides() -> dict:
     Repo-level entries win over home-level ones.
 
     Each entry: {"cmd": "<template containing {prompt}>", "efforts": [...],
-                 "install": "...", "note": "..."}
+                 "install": "...", "note": "...", "wait_note": "..."}
+
+    `wait_note` is how a CLI whose command-runtime cap this plugin has never
+    seen still briefs its partners correctly -- it replaces the generic wait
+    guidance for that CLI.
     """
     files = list(OVERRIDE_FILES)
     try:
@@ -1528,6 +1546,9 @@ def resolve_provider(name: str, cmd: str | None = None) -> dict:
                 "efforts": set(ov.get("efforts") or EFFORT_HINT),
                 "effort": "template", "install": ov.get("install", ""),
                 "cmd": ov["cmd"], "note": ov.get("note", ""),
+                # A cap this plugin has never heard of is describable by the
+                # person who has: the note goes into that CLI's briefings.
+                "wait_note": ov.get("wait_note", ""),
                 "source": ov.get("source", "")}
     if name in RECIPES:
         return {"kind": "recipe", **RECIPES[name]}
@@ -1881,10 +1902,11 @@ def open_tab(title: str, runner: Path, cwd: Path) -> dict:
 # or because the baton moved away -- nothing re-invokes it and the next thing
 # said to it lands in a transcript nobody is reading.
 #
-# Claude Code agents have a Stop hook to catch that. A codex or gemini tab has
-# no equivalent, so the recovery has to come from outside: type into its tab,
-# exactly as the human would. Every terminal with a control CLI can do that,
-# and `spawn` records which one owns each tab.
+# Claude Code agents have a Stop hook to catch that. Any other CLI may or may
+# not have an equivalent, and this plugin cannot require one -- so the recovery
+# comes from outside the agent entirely: type into its tab, exactly as the human
+# would. That works whatever is running in it. Every terminal with a control CLI
+# can do it, and `spawn` records which one owns each tab.
 
 def _orca_handle_for(title: str) -> str:
     """Find a live Orca tab by title, for agents spawned before handles were
@@ -2087,8 +2109,10 @@ somewhere.
     See who is here and who holds the write baton:
         {run} list
 
-    Bring in another partner, if a question needs an angle none of us has:
-        {run} spawn --provider codex --model gpt-5-codex --effort high
+    Bring in another partner, if a question needs an angle none of us has
+    (`{run} providers` lists the CLIs this machine has, `{run} models
+    --provider <cli>` what to point one at):
+        {run} spawn --provider <cli> --model <id> --effort high
 
     Wake an agent that stopped looping (types into its tab):
         {run} nudge --id <id>
@@ -2742,7 +2766,7 @@ def cmd_resume(args) -> int:
 # agent stamps <id>/lastseen each time it acts, so being alive means having
 # done something recently rather than having been started once.
 
-LIVE_WINDOW = 360          # seconds; `wait` returns every 120s and loops
+LIVE_WINDOW = 360          # seconds; `wait` returns within WAIT_TIMEOUT and loops
 
 
 def touch_seen(sd: Path, pid: str) -> None:
@@ -3118,7 +3142,8 @@ def cmd_list(args) -> int:
     holder = baton_of(roster)
     print(f"baton: {holder}   (only the baton holder edits files)")
     if not roster["partners"]:
-        print("nobody here -- spawn someone with: partner.py spawn --provider codex")
+        print("nobody here -- `partner.py providers` lists the agent CLIs on "
+              "this machine, then: partner.py spawn --provider <one of them>")
         return 0
     me = me_id(roster)
     live_map = liveness(sd, roster)

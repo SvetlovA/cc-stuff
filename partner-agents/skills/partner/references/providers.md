@@ -192,12 +192,15 @@ Describe it once in `~/.claude/partner-providers.json` (or `.partner/providers.j
     "cmd": "aider --model {model} --yes --message {prompt}",
     "efforts": ["low", "medium", "high"],
     "install": "pipx install aider-chat",
-    "note": "terse, diff-focused; good at spotting an over-broad change"
+    "note": "terse, diff-focused; good at spotting an over-broad change",
+    "wait_note": "kills any command after 30s -- pass --timeout 600 to `wait`, and re-run it if it still returns empty"
   }
 }
 ```
 
 It then appears in `providers`, validates against its own `efforts`, and spawns as `--provider aider` with no template on the command line. Same substitution code as `--cmd`, so there is one template language, not two.
+
+`wait_note` is optional and exists so a cap this plugin has never measured still reaches that CLI's partners: whatever it says replaces the generic wait guidance in every briefing for that provider. Leave it out and the generic rule applies, which is already correct — just one round slower to learn.
 
 The file is optional in every sense — it exists so a CLI used often does not have to be retyped.
 
@@ -207,18 +210,23 @@ Run shell commands. That is how it calls `wait` and `send`. A CLI that cannot ru
 
 ## Command-runtime caps
 
-Every CLI limits how long one shell command may run, and `wait` is a long-running command by design — so the cap decides whether an agent can stay in the loop at all. A wait longer than the cap is killed mid-poll and returns nothing, which reads as a broken command; the agent then ends its turn and, having no Stop hook outside Claude Code, is never re-invoked.
+Every agent CLI limits how long one shell command may run, and `wait` is a long-running command by design — so the cap decides whether an agent can stay in the loop at all. A wait longer than the cap is killed mid-poll and returns nothing, which reads as a broken command; the agent then ends its turn and, unless its CLI happens to have a Stop hook, is never re-invoked.
 
-| CLI | Default cap | What its briefing says |
-|-----|-------------|------------------------|
-| `codex` | **10s** (`yield_time_ms` on the exec tool) | pass `timeout_ms`/`yield_time_ms` of 600000 on every wait call, or the `// @exec: {"yield_time_ms": 600000}` pragma in code mode; an early return is the cap, so run `wait` again |
-| `claude` | 120s (Bash tool), 600s max | keep `wait` under it — its own default is 90s — or pass a longer tool timeout |
-| `gemini` | not documented | treat an early return as the cap and run `wait` again |
-| anything else | unknown | the generic note: an early or empty return is the cap, not an answer |
+**The rule is stated to every agent, whatever it is running**, because it holds for every CLI and no partner should depend on this file having heard of it:
 
-`WAIT_NOTES` in `partner.py` holds these, keyed by provider name, and `wait_note()` falls back to the generic text for a CLI with no entry. Add an entry when a CLI's cap is known — it goes straight into that provider's briefings.
+> If `wait` comes back early — especially with no output at all — that is your shell tool's cap, not a failure and not an answer. Raise the timeout you pass that tool if it takes one, and either way run `wait` again immediately.
 
-`wait`'s own default is 90s for the same reason: at 120s it sat exactly on Claude Code's Bash cap, turning every normal wait into a tool error.
+A **specific** cap is only an accelerator on top of that, and it lives with the rest of that CLI's launch facts rather than in a table of its own — `wait_note` in a recipe, or in the user's own `providers.json`. `resolve_provider` returns it like `install` or `efforts`, and `wait_note()` falls back to the generic rule whenever a CLI has none, including every probed and `--cmd` CLI.
+
+| Where the CLI comes from | Where its note comes from |
+|--------------------------|---------------------------|
+| a built-in recipe | the recipe's `wait_note` (two are measured: a 120s Bash-tool cap, and a 10s exec-tool cap) |
+| `~/.claude/partner-providers.json` or `.partner/providers.json` | that entry's `wait_note` — how a cap this plugin has never seen still reaches the briefing |
+| a probed CLI, or `--provider custom --cmd` | the generic rule |
+
+Measuring a cap is not something `--help` can answer, which is why this is guidance rather than discovery: the agent finds its own limit the first time a wait returns early, and the note only saves it that round.
+
+`wait`'s own default is 90s for the same reason: at 120s it sat exactly on one known cap, turning every normal wait into a tool error.
 
 A cap is only half the problem — the other half is that nothing re-invokes a tab agent that ends its turn. Inside Claude Code the `Stop` hook catches that; elsewhere the recovery is a nudge typed into the tab (`references/terminals.md`). Codex 0.153 does implement a Claude-Code-shaped hooks system of its own, including a `Stop` event, but its hooks require a persisted trust hash or `--dangerously-bypass-hook-trust`, so wiring one from here would risk a trust prompt blocking the very startup it is meant to protect. Worth revisiting once that surface is documented.
 
@@ -243,10 +251,11 @@ RECIPES["mytool"] = {
     "efforts": {"low", "medium", "high", "max"},   # what validation accepts
     "install": "npm install -g mytool",
     "login": "mytool auth",
+    "wait_note": "",              # optional: this CLI's command-runtime cap
 }
 ```
 
-`tui` receives `{prompt, model, effort, auto}` and returns an argv list. No model list is needed — that comes from the machine.
+`tui` receives `{prompt, model, effort, auto}` and returns an argv list. No model list is needed — that comes from the machine. `wait_note` is optional; omit it and partners on this CLI get the generic wait rule.
 
 ## Effort
 

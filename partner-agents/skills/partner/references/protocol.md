@@ -101,7 +101,7 @@ Past sessions live alongside, each a complete copy of the above:
 
 `roster.json` records `status: "running"` because nothing has told it otherwise. Close a tab and the claim survives, so it cannot decide whether to add a partner or start over. Liveness is evidence instead:
 
-- **Heartbeat.** Every agent writes `<id>/lastseen` whenever it runs `wait`, `read`, `send` or `claim`. Acting is what proves it is alive, and `wait` returns every 120s and loops, so a working agent stamps at least every couple of minutes. Default window is 360s.
+- **Heartbeat.** Every agent writes `<id>/lastseen` whenever it runs `wait`, `read`, `send` or `claim`. Acting is what proves it is alive, and `wait` returns within its timeout (90s by default) and loops, so a working agent stamps at least every couple of minutes. Default window is 360s.
 - **Orca tab list.** Inside Orca, `orca terminal list` reports whether a tab titled `partner:<id>` still exists.
 
 A **fresh heartbeat outranks the tab list**. An agent that ran a command seconds ago is alive regardless of what the tab list says — checking tabs first would call it dead whenever the tab was renamed, launched with `--no-tab`, or started outside Orca. The tab check only downgrades an agent that has *not* checked in recently.
@@ -161,7 +161,7 @@ Because these are byte offsets rather than message indexes, an agent that was cl
 
 ### The cursor moves only after delivery succeeds
 
-`read_new` does not advance the cursor; `commit_cursor` does, after the output has been printed and flushed. The two were one step until a message went missing: a `wait` killed between "cursor advanced" and "output reached the model" consumed the message and lost it, and no later `wait` could return it, because the cursor was already past. That is not a rare race — codex terminates a command after 10s by default, so a wait is killed routinely. Delivering a message twice costs a duplicate; delivering it zero times costs the debate a participant.
+`read_new` does not advance the cursor; `commit_cursor` does, after the output has been printed and flushed. The two were one step until a message went missing: a `wait` killed between "cursor advanced" and "output reached the model" consumed the message and lost it, and no later `wait` could return it, because the cursor was already past. That is not a rare race: every CLI caps command runtime, and a cap shorter than the wait makes the kill routine rather than exceptional — the shortest measured here fires after 10s. Delivering a message twice costs a duplicate; delivering it zero times costs the debate a participant.
 
 ### `wait` asks the transcript, not just the cursor
 
@@ -202,17 +202,17 @@ Any agent can run any of these, `spawn` included. `.partner/p.sh` (no id) is the
 
 ### Command-runtime caps, and why they end debates
 
-Every agent reaches `wait` through its own CLI's shell tool, and each of those caps how long a command may run. Codex's exec tool terminates at **10s** by default; Claude Code's Bash tool at **120s**. A wait longer than the cap is killed mid-poll, and — before this was handled — returned nothing at all. An agent reading an empty result from the command its entire loop depends on concludes the command is broken and ends its turn, which for a tab agent is permanent: nothing re-invokes it.
+Every agent reaches `wait` through its own CLI's shell tool, and every one of those caps how long a command may run. The two measured here differ by more than tenfold: one CLI's exec tool terminates at **10s** by default, another's Bash tool at **120s**. A wait longer than the cap is killed mid-poll, and — before this was handled — returned nothing at all. An agent reading an empty result from the command its entire loop depends on concludes the command is broken and ends its turn, which for a tab agent is permanent: nothing re-invokes it.
 
 Three changes make the loop survive that:
 
 - **`wait` announces itself before blocking**, flushed, so a killed call still prints the line telling the agent that a short return is the cap expiring and to run `wait` again. The output an agent gets from a truncated command is now instructions rather than silence.
-- **Each briefing carries its own CLI's cap.** A codex seed says to pass `timeout_ms`/`yield_time_ms` of 600000 on every wait call; a Claude seed says to stay under the 120s Bash timeout. `WAIT_NOTES` in `partner.py` holds them, with a generic note for any CLI without an entry.
-- **The default dropped from 120s to 90s**, since a default equal to Claude Code's Bash cap turned every normal wait into a tool error. 90s still stamps a heartbeat well inside the 360s liveness window.
+- **Every briefing states the rule, whatever the agent is running:** an early or empty `wait` is the tool's cap, so raise the timeout if the tool takes one and re-run it either way. A *specific* cap is an accelerator on top, and it travels with the rest of that CLI's launch facts — `wait_note` in a recipe or in the user's own `providers.json`, returned by `resolve_provider` like `install` or `efforts`. A CLI nobody has measured is still fully briefed by the rule.
+- **The default dropped from 120s to 90s**, since a default sitting exactly on a known cap turned every normal wait into a tool error. 90s still stamps a heartbeat well inside the 360s liveness window.
 
 ### Waking an agent that stopped listening
 
-A Stop hook only exists inside Claude Code. A codex or gemini tab that ends its turn is unreachable from inside the system, so the recovery comes from outside it: type into the tab, exactly as the human would.
+A Stop hook only exists inside Claude Code. Any other CLI may or may not have an equivalent, and this plugin cannot require one — so for a tab that ends its turn the recovery comes from outside the agent entirely: type into the tab, exactly as the human would. That works whatever is running in it.
 
 ```bash
 .partner/p.sh nudge --id p2      # one agent

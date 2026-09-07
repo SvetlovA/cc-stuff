@@ -3,7 +3,7 @@ name: partner
 description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
 argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | stop"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch, Skill
-version: 0.15.0
+version: 0.16.0
 ---
 
 # Partner
@@ -80,8 +80,8 @@ A fresh `/partner` archiving a live debate is intentional and reversible (`resum
 ```bash
 python "$P" state                                # who is alive; what a fresh /partner replaces
 python "$P" sessions                             # current + archived
-python "$P" spawn --provider codex --fresh ...   # /partner: new session, archive the old
-python "$P" spawn --provider codex ...           # /partner add: join the live session
+python "$P" spawn --provider <cli> --fresh ...   # /partner: new session, archive the old
+python "$P" spawn --provider <cli> ...           # /partner add: join the live session
 python "$P" resume                               # restart the current agents
 python "$P" resume --session 20260905-185718     # bring an archived one back
 ```
@@ -113,7 +113,7 @@ python "$P" models --provider <X>    # ids this machine names, and the effort th
 
 When they genuinely say "just pick": the newest **named** id in a balanced or deep tier, from a provider *different from your own model* — same-model agents tend to agree with you. Say which you chose and why.
 
-Validate before spawning: `python "$P" check --provider codex --model gpt-5.6 --effort high`. A **problem** stops the spawn and carries the command that fixes it — relay that verbatim. A **caution** is the script not recognising something, not evidence it is wrong; pass it on and continue. An unrecognised model is always a caution.
+Validate before spawning: `python "$P" check --provider <cli> --model <id> --effort high`. A **problem** stops the spawn and carries the command that fixes it — relay that verbatim. A **caution** is the script not recognising something, not evidence it is wrong; pass it on and continue. An unrecognised model is always a caution.
 
 **Auto levels** control how often a partner stops to ask permission — a prompt in an unwatched tab stalls the debate. `--auto edits` (default) accepts file edits while keeping the sandbox; `ask` keeps normal prompting; `full` removes both. Per-provider flags: `references/providers.md`.
 
@@ -139,8 +139,8 @@ Each gets its own `.partner/<id>/handoff.md`, so a third never disturbs the seco
 One `spawn` call does everything: it registers **you** from the `--me-*` values, writes both briefings, and opens the partner's tab. Describe yourself as fully as the partner — you are a peer, not the thing the others hang off.
 
 ```bash
-python "$P" spawn --provider codex --model gpt-5-codex --effort high --fresh \
-  --me-provider claude --me-model <this session's model id> --me-effort high \
+python "$P" spawn --provider <cli> --model <id the user picked> --effort high --fresh \
+  --me-provider <your own cli> --me-model <this session's model id> --me-effort high \
   --context "Auth rewrite in src/auth/. Decided: opaque session tokens,
   Redis-backed -- do not reopen, JWT revocation was the blocker. Open: do
   refresh tokens rotate every use or only near expiry? Cannot break /v1/login."
@@ -192,7 +192,7 @@ The second must be **backgrounded** (the Bash tool with `run_in_background: true
 
 `.partner/<id>/lastseen` is the proof it is running — the stamp refreshes every few seconds while `wait` polls. Missing or minutes old means this session is deaf, whatever the roster claims.
 
-**A `wait` that returns early or empty is never a reason to stop.** Every CLI caps command runtime — codex's exec tool at 10s, Claude Code's Bash tool at 120s — so a capped `wait` comes back with nothing, and an agent reading that as a broken command leaves the loop for good. Each briefing carries its own CLI's cap (`references/providers.md`); run `wait` again.
+**A `wait` that returns early or empty is never a reason to stop.** Every agent CLI caps how long one command may run — the two measured here differ by more than tenfold — so a capped `wait` comes back with nothing, and an agent reading that as a broken command leaves the loop for good. Every briefing states the rule for whatever CLI the agent is running, plus that CLI's specific cap when one is known (`references/providers.md`); either way, run `wait` again.
 
 **Nothing is delivered once and forgotten.** `wait` checks the transcript for anything addressed to an agent and still unanswered, not only what its cursor has not seen — so a message dropped by a killed `wait` or by a turn that ended without replying comes back marked *re-delivered* instead of needing another agent to notice. Answering is what clears it; `pending` shows what is owed.
 
