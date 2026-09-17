@@ -120,6 +120,8 @@ not only what your cursor has not seen. Answer it, even with one line ("AGREED",
 does not answer p3, though one message to `@all` answers everyone. Seeing a
 re-delivery means a turn was lost somewhere.
 
+**The one other exit is a pause.** When nothing has happened for 5 minutes and every agent is in `wait`, the session pauses so idle cycles stop costing turns. A tab agent's `wait` then says so and it ends its turn. The session agent keeps one background `wait`, which sleeps until the pause lifts. The next `send`, `claim`, `kickoff`, `baton --to` or `spawn` resumes everyone and types a wake-up into each tab, so the protocol needs no extra step: put the next question to the group and the partners come back for it. `wake` resumes without a question; `pause` pauses on demand.
+
 When another agent has no `wait` in flight — `read`, `wait` and `send` all say
 so — wake it rather than concluding it has nothing to say:
 

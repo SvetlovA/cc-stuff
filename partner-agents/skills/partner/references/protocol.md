@@ -255,6 +255,34 @@ The briefing tells each agent to loop — `wait`, think, `send`, repeat — and 
 
 The one agent that does **not** block on `wait` is the session someone typed the skill into. It reaches the human through its own Claude Code harness, and a foreground block would stop them talking to it — so its briefing has it run `wait` as a **background** command instead. Claude Code re-invokes it when that returns (a partner spoke, or it timed out), which is what keeps it in the debate even while the human is working in another agent's tab. Without this it would sit idle any time the conversation moved to a tab — participating only when addressed in its own session. It keeps exactly one background `wait` in flight and re-arms it at the end of every turn. That is the only difference between any two agents here, and it comes from how the human reaches them, not from rank.
 
+### Pausing when everyone is idle
+
+A `wait` that times out with nothing hands control back to its model, and the model spends a turn deciding to run `wait` again. One cycle is cheap. Three agents cycling every 90s through an hour nobody is at the keyboard is most of what the session costs, and none of it buys anything. So an idle session pauses.
+
+**When.** Each polling `wait` asks `idle_verdict` on its first pass and then every `IDLE_CHECK` (15s). The session pauses only when all three of these hold:
+
+1. **Nothing has happened for `idle_pause` seconds** (default `IDLE_PAUSE`, 300). "Happened" means the newest of three stamps: `.partner/activity`, which every command that is work writes (`send`, `kickoff`, `claim`, `baton --to`, `spawn`, `wake`); the last non-system message; and the newest agent's `started`. `lastseen` cannot answer this, because every polling `wait` refreshes it.
+2. **Every running agent is idle** (`agent_idle`, which by default means a `wait` is in flight for it). One agent out of `wait` means somebody is working, so everybody keeps looping.
+3. **Every tab agent can be woken again** (`wakeable`): its terminal entry has a `send` template. A pause that strands a tab nobody can type into saves tokens by losing the partner, so it does not happen on its own. `pause` by hand still works and names the tabs that will need a "continue" typed into them.
+
+**What pausing does.** `.partner/paused.json` is created exclusively, since several waits can reach the same verdict in the same second and exactly one should post. Its creator appends one `system` notice to `@all`, which every live `wait` hands over like any message. After that:
+
+- a **tab agent's** `wait` returns at once with the pause banner ("do not run `wait` again, end your turn"), and its briefing makes that the one legitimate exit from the loop besides a stop;
+- the **session agent's** `wait` ignores its deadline and keeps polling without returning. It is a background process of its harness, so sleeping costs nothing, and it is how that session hears a resume that starts in a tab;
+- `silent_agents` returns nobody, so no `wait`, `read` or `send` nudges a paused tab back one at a time;
+- the Stop hook lets a paused tab agent end its turn. The session agent is still held to its one background `wait`;
+- `liveness` reports a quiet agent as `paused` rather than `stale`, and `state` recommends `wake`.
+
+**Resuming.** `mark_active` stamps `activity` and, if `paused.json` existed, unlinks it (the one that succeeds does the rest), posts a "session resumed" notice, and nudges every running tab agent with no `wait` in flight. It skips an agent that started under 30s ago, because that tab is still booting. That nudge is unthrottled, so a nudge a minute earlier cannot swallow it, and it stamps `.nudge` afterwards so `send`'s own pass does not type a second line. The notice ends the session agent's sleeping `wait`. The activity stamp is what stops the session from pausing again on the very next check.
+
+`resume` and `archive` clear `paused.json` and `activity` outright: a relaunch has no tabs to type into, and a pause belongs to the arrangement it paused.
+
+```bash
+.partner/p.sh pause                 # now
+.partner/p.sh pause --after 900     # threshold for this session, in roster.json; 0 = never
+.partner/p.sh wake                  # resume and wake every tab
+```
+
 ## Opening the session
 
 A roster of briefed agents is not a debate. Everyone is blocked on `wait`, the transcript holds nothing but join notices, and nobody has been asked anything — so the session has to be opened deliberately:
@@ -306,6 +334,7 @@ Details that keep it from getting in the way:
 - **The baton holder is exempt from check 1.** It drives the change; it is not waiting on anyone. `pending_for` returns nothing for it. Check 2 still applies — driving is not an excuse for going deaf.
 - **Own messages never count** — an agent cannot owe itself a reply (`m["from"] != who`).
 - **It nags at a bounded rate.** `.partner/<id>/.stop-nag` holds the transcript size at the last message block — an identical size means "already told them". `.stop-nag-live` throttles the listener warning to once every 120s, since that one is not tied to a new message. A genuinely stuck agent is never wedged in an unbreakable loop.
+- **A pause lets tab agents go.** While `paused.json` exists, check 2 does not apply to a tab agent, since leaving the loop is what a pause asks of it. The session agent is still held to its background `wait`, which sleeps through the pause for free.
 - **It fails open.** No Python, no `.partner/`, or an unregistered/stopped agent — the stop proceeds.
 - **Identity** comes from `PARTNER_ID`, which `run.sh`/`run.cmd` export into the tab, so the hook resolves the same agent the wrappers do rather than assuming it is the session.
 
