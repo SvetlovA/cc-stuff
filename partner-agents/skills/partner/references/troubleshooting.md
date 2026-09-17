@@ -34,11 +34,19 @@
 
 **Partner opens by answering the whole backlog, then goes quiet.** Its cursor started at zero, so its first `wait` returned the entire transcript instead of blocking for the question. `spawn` sets the cursor to the end of `chat.md` right after the join message to prevent this; if you see it, check `.partner/<id>/cursor` exists and is non-zero, and that the join `system` message is in the transcript.
 
-**Partners went quiet after a few idle minutes.** Expected: the session paused itself, because nothing had happened for 5 minutes and every agent was in `wait`. `state` and `list` say PAUSED. They are idle, not gone: the next `send`, `claim` or `kickoff` wakes them, and `wake` does it without a question. To pause later or never, use `pause --after 900` or `pause --after 0`.
+**Partners went quiet after the work was done.** Expected: every agent had finished (back in `wait`, nothing owed, not mid-turn) and a minute passed with nothing new, so the loops paused. `state` and `list` say PAUSED. They are idle, not gone: the first message to any of them wakes everyone. To wait longer before pausing, or never pause, use `idle --after 300` or `idle --after 0`.
 
-**The session never pauses, and idle partners keep cycling.** One of the conditions is missing. `state` prints the reason on its `idle pause:` line. Usual causes: an agent is out of `wait` (working, or it stopped looping and needs a `nudge`), something keeps stamping activity, or a tab runs in a terminal that cannot be typed into (`terminals` says which). The last one is deliberate, because nothing could wake that tab again. Pause it by hand and type "continue" in the tab afterwards.
+**The session paused while an agent was still working.** That agent sat in `wait` with its work unfinished, and going back to `wait` is how an agent declares it is done. Check its `.partner/<id>/seed.md` has the "Going back to `wait` says you are finished" paragraph. For the Claude Code session, the prompt hook marks the turn as open; if `.partner/<id>/turn` never appears while it works, the hooks did not load (see "The Stop hook is not firing"). Recovery is cheap either way: the working agent's next `send` wakes the session.
 
-**A paused partner did not come back.** The resume nudge types into its tab, so this is the same problem as any failed nudge. `send` and `wake` print `could not wake: <id> (<why>)`. Type "continue" in that tab, or `nudge --id <id>`.
+**The session never pauses, and idle partners keep cycling.** `idle` names the reason for each agent:
+- `not in wait -- still working`: it is working, or it stopped looping and needs a `nudge`;
+- `owes a reply to <id>`: answer it;
+- `mid-turn`: a Claude Code turn that has not ended, which goes stale after 30 min;
+- `finished Ns ago`: it keeps being handed something.
+
+If `idle` says a tab `could not be woken`, it runs in a terminal that cannot be typed into (`terminals` says which), and pausing it would strand it. That is deliberate.
+
+**A paused partner did not come back.** The resume nudge types into its tab, so this is the same problem as any failed nudge. `send` prints `could not wake: <id> (<why>)`. Type "continue" in that tab, or `nudge --id <id>`.
 
 **Partner stopped looping.** Interactive agents sometimes end their turn instead of running `wait` again — most often right after a discussion concludes, or after the baton moves to someone else. `.partner/<id>/waiting` exists only while a `wait` is actually polling, so its absence is the check. `nudge --id <id>` types a wake-up into the tab; `send` does it automatically for a recipient that is not listening; `read` and `wait` name any agent nothing is listening for. For a Claude Code tab or the session agent the Stop hook blocks that turn from ending; any other CLI may have no equivalent, which is why the nudge exists — it works regardless of what is running in the tab.
 
@@ -56,7 +64,7 @@ Three things address it, and all three are in place: `wait` prints what it is do
 
 **The orientation pass turned into work.** Agents started editing, or kept exploring past two rounds. The brief forbids both explicitly (nobody edits, two rounds, then back to `wait`); check the transcript for the orientation message — if it is missing or was improvised rather than sent by `kickoff`, that is why. Send the real one.
 
-**The Stop hook is not firing.** `hooks.json` loads once at session start — a session open before the plugin was installed will not have it; restart. It also needs `bash` and Python on `PATH`. Test from the repo root: `python <plugin>/skills/partner/scripts/partner.py hook-stop < /dev/null` prints nothing and exits 0 when nothing is owed. A `.partner/<id>/.stop-nag` file that matches the current `chat.md` size means it already nagged and is holding off — expected.
+**The Stop hook is not firing.** `hooks.json` loads once at session start — a session open before the plugin was installed will not have it; restart. It also needs `bash` and Python on `PATH`. Test from the repo root: `python <plugin>/skills/partner/scripts/partner.py hook-stop < /dev/null` prints nothing and exits 0 when nothing is owed; `hook-prompt` always does. A `.partner/<id>/.stop-nag` file that matches the current `chat.md` size means it already nagged and is holding off — expected.
 
 **Partners only ever reply to the baton holder, never each other.** The advisors are meant to debate among themselves and hand the holder a joint view — `send --to p3`, not just `--to @all`. If every message is a spoke to one hub, `send` one advisor a direct question to seed a side thread.
 

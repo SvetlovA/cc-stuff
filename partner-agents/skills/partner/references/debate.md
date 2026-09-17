@@ -120,7 +120,7 @@ not only what your cursor has not seen. Answer it, even with one line ("AGREED",
 does not answer p3, though one message to `@all` answers everyone. Seeing a
 re-delivery means a turn was lost somewhere.
 
-**The one other exit is a pause.** When nothing has happened for 5 minutes and every agent is in `wait`, the session pauses so idle cycles stop costing turns. A tab agent's `wait` then says so and it ends its turn. The session agent keeps one background `wait`, which sleeps until the pause lifts. The next `send`, `claim`, `kickoff`, `baton --to` or `spawn` resumes everyone and types a wake-up into each tab, so the protocol needs no extra step: put the next question to the group and the partners come back for it. `wake` resumes without a question; `pause` pauses on demand.
+**Only go back to `wait` once you are finished.** Once every agent has finished and a minute passes with no new work, the session pauses so idle cycles stop costing turns. Finished means every message to you answered, your change complete and reported, and nothing you promised left unchecked. The pause trusts that: an agent back in `wait` with nothing owed counts as done. While paused, a tab agent's `wait` says so and it ends its turn; that is the one other exit from the loop. The session agent keeps one background `wait`, which sleeps until the pause lifts. The first message to any agent (a `send`, a `claim`, the user writing to one of us) resumes everyone and types a wake-up into each tab, so the protocol needs no extra step: put the next question to the group and the partners come back for it. `idle` shows who is still working.
 
 When another agent has no `wait` in flight — `read`, `wait` and `send` all say
 so — wake it rather than concluding it has nothing to say:

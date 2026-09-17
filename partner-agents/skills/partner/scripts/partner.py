@@ -591,6 +591,7 @@ def cmd_wait(args) -> int:
                 # before this point re-delivers rather than losing them.
                 sys.stdout.flush()
                 commit_cursor(sd, who, end)
+                break_idle(sd, who)      # handed work: not finished until it is
                 return 0
 
             # Nothing new -- but the cursor only records what was handed over,
@@ -615,12 +616,15 @@ def cmd_wait(args) -> int:
                           + silence_notice(sd, roster, who))
                 sys.stdout.flush()
                 commit_cursor(sd, who, end)
+                break_idle(sd, who)
                 return 0
 
+            # Nothing handed over on this poll: this agent is sitting finished.
+            note_idle(sd, who)
             paused = read_pause(sd)
             if paused and not sleeper:
                 emit(args, {"messages": [], "paused": paused},
-                     pause_banner(paused, who, sleeper=False))
+                     pause_banner(paused, sleeper=False))
                 return 0
             if not paused and time.time() >= next_idle:
                 next_idle = time.time() + IDLE_CHECK
@@ -2642,9 +2646,8 @@ them. `{run} pending` lists exactly what you still owe and to whom.
     Wake an agent that stopped looping (types into its tab):
         {run} nudge --id <id>
 
-    Resume a session that paused itself because everyone was idle (any `send`
-    or `claim` does this too):
-        {run} wake
+    See whether every agent has finished, and so whether the loops will pause:
+        {run} idle
 
 Any of us can spawn a partner. Any of us can hold the baton. There is no role
 here that only one agent has.
@@ -2778,12 +2781,20 @@ wait now says so and idles instead of consuming, so if you ever see "another
 5. System message saying you were stopped: say goodbye, exit the loop.
 
 6. `wait` says the session is **paused**: end your turn WITHOUT running `wait`
-   again. When nothing has happened for a while and all of us are idle, the
-   loops stop so nobody spends a model turn per cycle re-arming a `wait` that
-   will come back empty. A wake-up line is typed into your tab when the session
-   resumes -- then `{run} read` and back to step 1. If the human gives you work
-   while paused, `{run} claim` (or any `{run} send`) resumes everyone;
-   `{run} wake` does it explicitly.
+   again. Once all of us have finished and a minute has passed with no new
+   work, the loops stop, so nobody spends a model turn per cycle re-arming a
+   `wait` that will come back empty. The next message to any of us types a
+   wake-up line into your tab -- then `{run} read` and back to step 1. If the
+   human writes to you while paused, `{run} claim` first: that resumes everyone.
+
+**Going back to `wait` says you are finished.** The loops pause once every one
+of us has sat in `wait` for a minute with nothing owed, so a `wait` run while
+work is still open tells the group something false, and the pause can then
+stop everyone before you say what you were about to say. Before step 1, make
+sure all of it is done: every message to you answered (`{run} pending` is
+empty), the change you were making finished and reported, nothing you said you
+would check left unchecked. If you are not finished, keep working -- do not
+park it in a `wait`.
 
 **Whatever happened, you end at step 1** -- except a stop or a pause. A
 discussion reaching its conclusion is not an exit -- neither is the baton
@@ -2865,13 +2876,19 @@ Stop only on a system message saying you were stopped. A Stop hook holds you to
 both halves of this: it blocks the turn from ending while a message to you or
 `@all` is unanswered, and again if no `wait` is in flight for you.
 
-When nothing has happened for a while and every agent is idle, the session
-**pauses**: the tab agents stop looping so they stop spending a model turn per
-cycle. Your background `wait` does not stop -- it sleeps without returning until
-the session resumes, which costs nothing. So step 4 still holds while paused:
-exactly one background `wait`. Any `send` or `claim` resumes everyone and types
-a wake-up into their tabs; `{run} wake` does it explicitly -- run it when the
-human asks for the partners back without giving them anything yet.
+**Ending your turn says you are finished.** Once every agent has finished its
+work and a minute has passed with no new work, the session **pauses**: the tab
+agents stop looping so they stop spending a model turn per cycle. So end a turn
+only when all of it is done -- every message to you answered (`{run} pending`
+is empty), the change finished and reported, nothing you said you would check
+left unchecked. A hook marks your turn open from the human's message until it
+really ends, so the others never pause while you are mid-turn.
+
+While paused your background `wait` does not stop -- it sleeps without
+returning, which costs nothing. So step 4 still holds: exactly one background
+`wait`. Nothing needs doing to resume: the first message to any agent -- your
+`send` or `claim`, the human writing to you or to a tab -- wakes everyone and
+types a wake-up into their tabs.
 
 `read` and `wait` tell you when another agent has no `wait` in flight -- a tab
 CLI with no Stop hook of its own that ended its turn and is now deaf. `{run}
@@ -3303,11 +3320,12 @@ def cmd_resume(args) -> int:
 
     # Every tab is relaunched below, so there is nobody to type a wake-up into;
     # the stamp keeps the fresh agents from pausing before they have spoken.
-    try:
-        (sd / "paused.json").unlink()
-    except OSError:
-        pass
-    (sd / "activity").write_text(str(time.time()), encoding="utf-8")
+    _unlink(sd / "paused.json")
+    _write_float(sd / "activity", time.time())
+    for pid in roster["partners"]:
+        # Markers from before the relaunch describe processes that are gone.
+        for name in ("turn", "idle_since", "lastwait"):
+            _unlink(sd / pid / name)
 
     # History belongs in the briefing, not the inbox: an agent that finds 200
     # old messages waiting will try to answer all of them.
@@ -3492,7 +3510,7 @@ def liveness(sd: Path, roster: dict, window: int = LIVE_WINDOW) -> dict:
         if out[pid]["state"] == "stale" and read_pause(sd):
             # Quiet because it was told to be, not because its tab died.
             out[pid] = {"state": "paused", "age": age,
-                        "why": "idle pause -- `wake` or any `send` brings it back"}
+                        "why": "paused, all work finished -- the next message wakes it"}
     return out
 
 
@@ -3502,24 +3520,36 @@ def liveness(sd: Path, roster: dict, window: int = LIVE_WINDOW) -> dict:
 # An idle `wait` that times out hands control back to its model, which spends a
 # turn deciding to run `wait` again. One cycle is cheap; three agents cycling
 # every 90s through a lunch break is most of the bill for the session, and none
-# of it buys anything. So once nothing has happened for a while and every agent
-# is demonstrably idle, the session pauses: tab agents end their turn instead of
-# re-arming, and the session agent's background `wait` sleeps without returning
-# -- a process polling a file costs nothing, a model turn does.
+# of it buys anything. So once every agent has finished its work, the session
+# pauses: tab agents end their turn instead of re-arming, and the session
+# agent's background `wait` sleeps without returning -- a process polling a
+# file costs nothing, a model turn does.
 #
-# A pause is only worth having if nobody has to go round the tabs to undo it.
-# So everything that means work is happening again -- `send`, `kickoff`,
-# `claim`, `baton --to`, `spawn`, `wake` -- lifts it and types a wake-up line
-# into every tab, and a session is never paused automatically while one of its
-# tabs is in a terminal that cannot be typed into.
+# "Finished" has to be proven per agent, because pausing an agent mid-work
+# drops whatever it was about to say. Going back to `wait` is how an agent
+# declares it is done -- its briefing says so -- and the evidence is checked
+# rather than trusted: no unanswered message, no turn in progress, and a
+# continuous IDLE_PAUSE in `wait` since the last time `wait` handed it work.
+#
+# Resuming needs nobody: the first message to any agent -- `send`, `kickoff`,
+# `claim`, `spawn`, or the human writing to a Claude agent -- lifts the pause
+# and types a wake-up into every tab. That is also why a session never pauses
+# on its own while one of its tabs sits in a terminal that cannot be typed into.
 
-IDLE_PAUSE = 300           # seconds of quiet before an idle session pauses
+IDLE_PAUSE = 60            # seconds every agent must sit finished before pausing
 IDLE_CHECK = 15            # how often a polling `wait` re-asks the question
+# Between two empty `wait`s an agent spends one model turn re-arming. A gap no
+# longer than this continues its idle streak; a longer one means it was doing
+# something, and the streak starts over.
+REARM_GAP = 60
+# A turn marker older than this is from a turn that never reached Stop -- an
+# interrupt -- and stops counting as work in progress.
+TURN_STALE = 1800
 _WAKEABLE: dict[str, bool] = {}
 
 
 def pause_after(roster: dict) -> int:
-    """The idle threshold for this session; 0 means never pause on its own."""
+    """The idle threshold for this session; 0 means never pause."""
     try:
         return max(0, int(roster.get("idle_pause", IDLE_PAUSE)))
     except (TypeError, ValueError):
@@ -3533,70 +3563,72 @@ def read_pause(sd: Path) -> dict:
         return {}
 
 
-def pause_banner(paused: dict, who: str, sleeper: bool) -> str:
-    since = paused.get("since", "?")
-    if sleeper:
-        return (f"[session paused since {since} ({paused.get('why', 'idle')}). "
-                f"Your background `wait` sleeps until it resumes and costs "
-                f"nothing -- keep exactly one armed. Any `send` or `claim` "
-                f"resumes everyone; so does `wake`.]")
-    return (f"[session paused since {since} ({paused.get('why', 'idle')}). Do "
-            f"NOT run `wait` again -- end your turn now. This is the one time "
-            f"leaving the loop is right: a wake-up line is typed into your tab "
-            f"when the session resumes. If the human gives you work meanwhile, "
-            f"`claim` (or any `send`) resumes everyone; `wake` does it "
-            f"explicitly.]")
-
-
-PAUSE_NOTICE = """**Session paused: {why}.** Loops stop here, so idle agents stop
-spending a model turn every cycle re-arming `wait`.
-
-- **Tab agents:** do NOT run `wait` again. End your turn now. When the session
-  resumes, a wake-up line is typed into your tab.
-- **Session agent:** arm your one background `wait` as usual. While paused it
-  sleeps without returning, so it costs nothing.
-
-Anything that is work resumes it for everyone: `send`, `kickoff`, `claim`,
-`baton --to`, `spawn`, or `wake`.
-"""
-
-
-def last_activity(sd: Path, roster: dict) -> float:
-    """When anybody last did something other than wait, as epoch seconds.
-
-    `lastseen` cannot answer this -- every polling `wait` refreshes it. Commands
-    that are work stamp `activity`; the last real message and the newest agent's
-    start cover transcripts written before that stamp existed.
-    """
-    stamps = [0.0]
+def _read_float(f: Path) -> float | None:
     try:
-        stamps.append(float((sd / "activity").read_text(encoding="utf-8").strip()))
+        return float(f.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
+        return None
+
+
+def _write_float(f: Path, value: float) -> None:
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(str(value), encoding="utf-8")
+    except OSError:
         pass
+
+
+def _unlink(f: Path) -> None:
+    try:
+        f.unlink()
+    except OSError:
+        pass
+
+
+def note_idle(sd: Path, who: str) -> None:
+    """Called by a polling `wait`: extend this agent's idle streak, or start one."""
     now = time.time()
-    for m in reversed(tail_msgs(sd, 100000)):
-        if m["from"] != "system":
-            age = _age_seconds(m.get("ts"))
-            if age is not None:
-                stamps.append(now - age)
-            break
-    for entry in roster.get("partners", {}).values():
-        age = _age_seconds(entry.get("started"))
-        if age is not None:
-            stamps.append(now - age)
-    return max(stamps)
+    since = _read_float(sd / who / "idle_since")
+    last = _read_float(sd / who / "lastwait") or 0.0
+    if since is None or now - last > REARM_GAP:
+        _write_float(sd / who / "idle_since", now)
+    _write_float(sd / who / "lastwait", now)
 
 
-def agent_idle(sd: Path, roster: dict, pid: str) -> bool:
-    """Does this running agent count as idle for the purpose of pausing?
+def break_idle(sd: Path, who: str) -> None:
+    """This agent has work: whatever idle streak it had is over."""
+    _unlink(sd / who / "idle_since")
 
-    One working agent keeps the whole session looping, so this decides what
-    "working" means. The evidence available: `is_listening` (a `wait` is in
-    flight right now), `last_seen` (the last command it ran, waits included),
-    and whether it holds the baton (`baton_of(roster) == pid`).
+
+def idle_for(sd: Path, pid: str) -> float | None:
+    since = _read_float(sd / pid / "idle_since")
+    return None if since is None else time.time() - since
+
+
+def turn_open(sd: Path, pid: str) -> bool:
+    """Is a Claude Code session agent in the middle of a turn?
+
+    Its background `wait` stays in flight while it works on what the human
+    asked, so `is_listening` cannot tell a session agent that is done from one
+    that is busy. The prompt hook opens the turn, the Stop hook closes it.
     """
-    # TODO(user): decide how an agent with no `wait` in flight is treated.
-    return is_listening(sd, roster, pid)
+    opened = _read_float(sd / pid / "turn")
+    return opened is not None and time.time() - opened < TURN_STALE
+
+
+def agent_busy(sd: Path, roster: dict, pid: str) -> str:
+    """Why this agent has not finished its work -- or "" when it has."""
+    if turn_open(sd, pid):
+        return "mid-turn"
+    if not is_listening(sd, roster, pid):
+        return "not in `wait` -- still working"
+    owed = pending_for(sd, roster, pid)
+    if owed:
+        return f"owes a reply to {', '.join(sorted({m['from'] for m in owed}))}"
+    held, need = idle_for(sd, pid), pause_after(roster)
+    if held is None or held < need:
+        return f"finished {int(held or 0)}s ago, needs {need}s"
+    return ""
 
 
 def wakeable(roster: dict, pid: str) -> bool:
@@ -3611,6 +3643,28 @@ def wakeable(roster: dict, pid: str) -> bool:
     return _WAKEABLE[pid]
 
 
+def last_activity(sd: Path, roster: dict) -> float:
+    """When anybody last did something other than wait, as epoch seconds.
+
+    `lastseen` cannot answer this -- every polling `wait` refreshes it. Commands
+    that are work stamp `activity`; the last real message and the newest agent's
+    start cover transcripts written before that stamp existed.
+    """
+    stamps = [_read_float(sd / "activity") or 0.0]
+    now = time.time()
+    for m in reversed(tail_msgs(sd, 100000)):
+        if m["from"] != "system":
+            age = _age_seconds(m.get("ts"))
+            if age is not None:
+                stamps.append(now - age)
+            break
+    for entry in roster.get("partners", {}).values():
+        age = _age_seconds(entry.get("started"))
+        if age is not None:
+            stamps.append(now - age)
+    return max(stamps)
+
+
 def idle_verdict(sd: Path, roster: dict) -> tuple[bool, str]:
     """Whether the session should pause now -- and, when not, why not."""
     limit = pause_after(roster)
@@ -3618,19 +3672,47 @@ def idle_verdict(sd: Path, roster: dict) -> tuple[bool, str]:
         return False, "idle pause is off"
     quiet = time.time() - last_activity(sd, roster)
     if quiet < limit:
-        return False, f"last activity {int(quiet)}s ago"
+        return False, f"last message {int(quiet)}s ago, needs {limit}s"
     running = [p for p, e in roster["partners"].items()
                if e.get("status") == "running"]
-    busy = [p for p in running if not agent_idle(sd, roster, p)]
+    busy = [f"{p} {why}" for p in running
+            for why in [agent_busy(sd, roster, p)] if why]
     if busy:
-        return False, f"not idle: {', '.join(busy)}"
+        return False, "; ".join(busy)
     # Checked last: it is the only expensive question, and a pause that strands
     # a tab nobody can wake saves tokens by losing the partner.
     stuck = [p for p in running if not wakeable(roster, p)]
     if stuck:
-        return False, (f"{', '.join(stuck)} could not be woken again without "
-                       f"the human")
-    return True, f"nothing happened for {int(quiet // 60)} min and every agent is idle"
+        return False, (f"{', '.join(stuck)} could not be woken again by a "
+                       f"message, so the loops keep running")
+    return True, f"every agent finished its work and stayed idle for {limit}s"
+
+
+def pause_banner(paused: dict, sleeper: bool) -> str:
+    since = paused.get("since", "?")
+    if sleeper:
+        return (f"[session paused since {since}: every agent finished. Your "
+                f"background `wait` sleeps until the next message and costs "
+                f"nothing -- keep exactly one armed. Your first `send` or "
+                f"`claim` resumes everyone.]")
+    return (f"[session paused since {since}: every agent finished. Do NOT run "
+            f"`wait` again -- end your turn now. This is the one time leaving "
+            f"the loop is right: the next message to any of us types a wake-up "
+            f"into your tab. If the human writes to you meanwhile, `claim` "
+            f"first -- that resumes everyone.]")
+
+
+PAUSE_NOTICE = """**Session paused: {why}.** Loops stop here, so finished agents
+stop spending a model turn every cycle re-arming `wait`.
+
+- **Tab agents:** do NOT run `wait` again. End your turn now. The next message
+  to any of us types a wake-up line into your tab.
+- **Session agent:** arm your one background `wait` as usual. While paused it
+  sleeps without returning, so it costs nothing.
+
+Nothing needs doing to resume: the first message to any agent -- `send`,
+`kickoff`, `claim`, `spawn`, or the human writing to one of us -- wakes everyone.
+"""
 
 
 def pause_session(sd: Path, roster: dict, by: str, why: str) -> bool:
@@ -3648,22 +3730,19 @@ def pause_session(sd: Path, roster: dict, by: str, why: str) -> bool:
 def mark_active(sd: Path, roster: dict, who: str, why: str) -> dict:
     """Record that real work happened, and resume the session if it was paused.
 
-    Called by every command that is work rather than listening. The stamp is
-    what keeps a session that was just woken from pausing again on the next
-    check.
+    Called by every command that is a message or an instruction rather than
+    listening. The stamp is what keeps a session that was just woken from
+    pausing again on the next check.
     """
-    try:
-        sd.mkdir(parents=True, exist_ok=True)
-        (sd / "activity").write_text(str(time.time()), encoding="utf-8")
-    except OSError:
-        pass
+    _write_float(sd / "activity", time.time())
+    break_idle(sd, who)
     try:
         (sd / "paused.json").unlink()
     except OSError:
         return {"resumed": False, "woke": [], "failed": []}   # not paused, or lost the race
     append_msg(sd, "system", "@all",
-               f"**Session resumed** by **{who}** ({why}). Everyone back into "
-               f"the loop -- run `wait` again.", baton_of(roster))
+               f"**Session resumed** -- {who} {why}. Everyone back into the "
+               f"loop: `read`, then `wait`.", baton_of(roster))
     woke, failed = [], []
     for pid, entry in roster["partners"].items():
         if pid == who or entry.get("status") != "running":
@@ -3677,7 +3756,7 @@ def mark_active(sd: Path, roster: dict, who: str, why: str) -> dict:
         # line that ends this agent's pause. Stamped afterwards, so the caller's
         # own nudge pass (`send`) does not type a second one.
         r = nudge_agent(sd, roster, pid,
-                        f"the session resumed after an idle pause ({who}: {why}).",
+                        f"the session resumed after a pause ({who} {why}).",
                         throttle=0)
         if r["nudged"]:
             woke.append(pid)
@@ -3698,45 +3777,47 @@ def resume_note(res: dict) -> str:
     return out
 
 
-def cmd_pause(args) -> int:
-    """Pause now, or set how long a quiet session waits before pausing itself."""
+def cmd_idle(args) -> int:
+    """Why the session is or is not paused, and the threshold that decides it."""
     sd = state_dir()
     roster = load_roster(sd)
-    me = me_id(roster)
     if args.after is not None:
         roster["idle_pause"] = max(0, args.after)
         save_roster(sd, roster)
-        emit(args, {"idle_pause": roster["idle_pause"]},
-             f"idle pause after {roster['idle_pause']}s of quiet"
-             if roster["idle_pause"] else "idle pause off -- loops never stop on their own")
+    paused = read_pause(sd)
+    agents = {p: agent_busy(sd, roster, p) or "finished"
+              for p, e in roster["partners"].items() if e.get("status") == "running"}
+    verdict = None if paused else idle_verdict(sd, roster)
+    data = {"idle_pause": pause_after(roster), "paused": paused or None,
+            "agents": agents, "would_pause": verdict[0] if verdict else None,
+            "why": paused.get("why") if paused else verdict[1]}
+    if args.json:
+        print(json.dumps(data, indent=2))
         return 0
-    if read_pause(sd):
-        emit(args, {"paused": read_pause(sd)}, "already paused -- `wake` resumes")
-        return 0
-    stuck = [p for p, e in roster["partners"].items()
-             if e.get("status") == "running" and not wakeable(roster, p)]
-    pause_session(sd, roster, me, f"requested by {me}")
-    tail = (f"{NL}{', '.join(stuck)} cannot be typed into: after `wake`, type "
-            f"\"continue\" in those tabs yourself" if stuck else "")
-    emit(args, {"paused": True, "unwakeable": stuck},
-         f"paused -- tab agents stop looping at their next `wait`; `wake` or any "
-         f"`send` resumes{tail}")
+    limit = pause_after(roster)
+    print(f"pauses once every agent has been finished for {limit}s" if limit
+          else "idle pause off -- loops never stop on their own")
+    print(f"PAUSED since {paused.get('since')} -- the next message resumes"
+          if paused else f"not paused: {verdict[1]}")
+    for p, why in agents.items():
+        print(f"  {p:8} {why}")
     return 0
 
 
-def cmd_wake(args) -> int:
-    """Resume a paused session and type a wake-up into every tab."""
-    sd = state_dir()
-    roster = load_roster(sd)
-    me = me_id(roster)
-    touch_seen(sd, me)
-    res = mark_active(sd, roster, me, "woken by hand")
-    if not res["resumed"]:
-        emit(args, res, "not paused -- nothing to resume. `nudge` wakes an agent "
-                        "that stopped looping on its own.")
-        return 0
-    emit(args, res, resume_note(res).strip())
-    return 0
+def hook_prompt(sd: Path, roster: dict, who: str, prompt: str) -> None:
+    """UserPromptSubmit: a turn starts, and a human message resumes the session.
+
+    The boot prompt and a wake-up line land here too, and neither is the human
+    writing -- both disown themselves in their first words.
+    """
+    entry = roster["partners"].get(who) or {}
+    if (entry.get("kind") or "tab") == "session":
+        _write_float(sd / who / "turn", time.time())
+        break_idle(sd, who)
+    automated = prompt.lstrip().startswith(
+        ("continue -- automated wake-up", "[automated launch message"))
+    if not automated and read_pause(sd):
+        mark_active(sd, roster, who, "was written to by the human")
 
 
 def cmd_state(args) -> int:
@@ -3757,10 +3838,10 @@ def cmd_state(args) -> int:
     past = read_sessions(sd)
 
     if paused:
-        rec, why = "wake", (f"session paused since {paused.get('since')} "
-                            f"({paused.get('why')}) -- the partners are idle, "
-                            f"not gone. Any `send` or `claim` resumes them; "
-                            f"`wake` does it now")
+        rec, why = "add", (f"session paused since {paused.get('since')} -- "
+                           f"every agent finished its work. The partners are "
+                           f"idle, not gone: the next `send` or `claim` wakes "
+                           f"them all")
     elif live:
         rec, why = "add", (f"{', '.join(live)} active -- `/partner` archives this "
                            f"session and starts one partner fresh; `/partner add` "
@@ -3974,7 +4055,7 @@ def cmd_read(args) -> int:
     paused = read_pause(sd)
     sleeper = ((roster["partners"].get(who) or {}).get("kind") or "tab") == "session"
     if paused and not (sleeper and not marker_live(mine)):
-        listening = NL * 2 + pause_banner(paused, who, sleeper)
+        listening = NL * 2 + pause_banner(paused, sleeper)
     elif marker_live(mine):
         left = max(0, int((mine.get("deadline") or 0) - time.time()))
         listening = (f"{NL * 2}[a `wait` is already in flight for you "
@@ -4014,7 +4095,7 @@ def cmd_list(args) -> int:
     paused = read_pause(sd)
     if paused:
         print(f"PAUSED since {paused.get('since')} ({paused.get('why')}) -- "
-              f"`wake` or any `send` resumes")
+              f"every agent finished; the next message resumes")
     if not roster["partners"]:
         print("nobody here -- `partner.py providers` lists the agent CLIs on "
               "this machine, then: partner.py spawn --provider <one of them>")
@@ -4327,18 +4408,47 @@ def cmd_pending(args) -> int:
 
 
 def cmd_hook_stop(args) -> int:
-    """Stop-hook entry point. Blocks the turn from ending while a partner
-    message waits for this agent's reply.
-
-    A tab agent blocked on `wait` never reaches a Stop; the session agent does,
-    every turn, and nothing else re-invokes it once the human's attention moves
-    to another tab. Reads the hook payload on stdin, prints a block decision on
-    stdout when a reply is owed, stays silent (approve) otherwise. Fails open.
-    """
+    """Stop-hook entry point: block if a reply is owed or nobody is listening,
+    and otherwise record that this agent's turn is over."""
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         payload = {}
+    ctx = _hook_context(payload)
+    if not ctx:
+        return 0
+    sd, roster, who, entry = ctx
+    reason = stop_block_reason(sd, roster, who, entry)
+    if reason:
+        print(json.dumps({"decision": "block", "reason": reason}))
+        return 0
+    if (entry.get("kind") or "tab") == "session" and (sd / who / "turn").exists():
+        # The turn really ends here. Its background `wait` kept polling through
+        # it, so the idle streak that built up is not evidence of being
+        # finished -- being finished starts now.
+        _unlink(sd / who / "turn")
+        _write_float(sd / who / "idle_since", time.time())
+    return 0
+
+
+def cmd_hook_prompt(args) -> int:
+    """UserPromptSubmit entry point. Never blocks, prints nothing, fails open."""
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        payload = {}
+    ctx = _hook_context(payload)
+    if ctx:
+        sd, roster, who, _ = ctx
+        try:
+            hook_prompt(sd, roster, who, str(payload.get("prompt") or ""))
+        except OSError:
+            pass
+    return 0
+
+
+def _hook_context(payload: dict):
+    """The running agent a hook fired for, or None when there is none."""
     cwd = payload.get("cwd")
     if cwd:
         try:
@@ -4348,16 +4458,24 @@ def cmd_hook_stop(args) -> int:
     try:
         sd = state_dir()
     except OSError:
-        return 0
+        return None
     if not (sd / "roster.json").exists():
-        return 0
-
+        return None
     roster = load_roster(sd)
     who = me_id(roster)
     entry = roster["partners"].get(who)
     if not entry or entry.get("status") != "running":
-        return 0
+        return None
+    return sd, roster, who, entry
 
+
+def stop_block_reason(sd: Path, roster: dict, who: str, entry: dict) -> str:
+    """Why this agent may not end its turn yet, or "".
+
+    A tab agent blocked on `wait` never reaches a Stop; the session agent does,
+    every turn, and nothing else re-invokes it once the human's attention moves
+    to another tab. An empty answer lets the stop through.
+    """
     rel = f".partner/{who}"
     run = rel.replace("/", "\\") + "\\p.cmd" if os.name == "nt" else rel + "/p.sh"
 
@@ -4370,7 +4488,7 @@ def cmd_hook_stop(args) -> int:
         size = str(chat.stat().st_size if chat.exists() else 0)
         marker = sd / who / ".stop-nag"
         if marker.exists() and marker.read_text(encoding="utf-8").strip() == size:
-            return 0
+            return ""
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(size, encoding="utf-8")
         reason = (
@@ -4379,8 +4497,7 @@ def cmd_hook_stop(args) -> int:
             f"Do not stop. Run `{run} read`, then follow the debate protocol -- "
             f"verify against the code and `{run} send` your reply. You do not "
             f"hold the baton, so advise; do not edit files.")
-        print(json.dumps({"decision": "block", "reason": reason}))
-        return 0
+        return reason
 
     # 2. Nothing is waiting for an answer -- but is this agent still listening?
     # A discussion ending, or the baton moving to somebody else, is exactly when
@@ -4389,14 +4506,14 @@ def cmd_hook_stop(args) -> int:
     # agent goes back to `wait` at the end of every turn, and this is what
     # enforces it.
     if is_listening(sd, roster, who):
-        return 0
+        return ""
     if read_pause(sd) and (entry.get("kind") or "tab") != "session":
         # Paused: a tab agent leaving the loop is the point. The session agent
         # is still held to its one background wait -- it sleeps for free, and
         # it is how this session hears a resume that starts in a tab.
-        return 0
+        return ""
     if _nag_throttled(sd / who / ".stop-nag-live", 120):
-        return 0
+        return ""
     holder = baton_of(roster)
     lost = f" The baton is {holder}'s, not yours." if holder != who else ""
     if (entry.get("kind") or "tab") == "session":
@@ -4412,8 +4529,7 @@ def cmd_hook_stop(args) -> int:
         f"the human in another tab, or by a partner -- you will not see.{NL * 2}"
         f"Before ending the turn: run `{run} read` and answer anything it shows, "
         f"then {how}.")
-    print(json.dumps({"decision": "block", "reason": reason}))
-    return 0
+    return reason
 
 
 def emit(args, data: dict, human: str) -> None:
@@ -4551,15 +4667,12 @@ def main() -> int:
     ng.add_argument("--text", default=None, help="why they are being woken")
     ng.set_defaults(fn=cmd_nudge)
 
-    pz = sub.add_parser("pause", help="stop every agent's loop now, or set when "
-                                      "an idle session pauses itself")
-    pz.add_argument("--after", type=int, default=None,
-                    help=f"seconds of quiet before pausing on its own "
-                         f"(default {IDLE_PAUSE}; 0 turns it off)")
-    pz.set_defaults(fn=cmd_pause)
-
-    wk = sub.add_parser("wake", help="resume a paused session and wake every tab")
-    wk.set_defaults(fn=cmd_wake)
+    idl = sub.add_parser("idle", help="whether every agent has finished, and "
+                                      "when the loops pause")
+    idl.add_argument("--after", type=int, default=None,
+                     help=f"seconds every agent must be finished before the "
+                          f"loops pause (default {IDLE_PAUSE}; 0 turns it off)")
+    idl.set_defaults(fn=cmd_idle)
 
     r = sub.add_parser("read")
     r.add_argument("--for", dest="who", default=None,
@@ -4596,6 +4709,8 @@ def main() -> int:
 
     sub.add_parser("hook-stop", help="internal: Stop-hook backstop"
                    ).set_defaults(fn=cmd_hook_stop)
+    sub.add_parser("hook-prompt", help="internal: UserPromptSubmit hook"
+                   ).set_defaults(fn=cmd_hook_prompt)
 
     args = ap.parse_args()
     try:

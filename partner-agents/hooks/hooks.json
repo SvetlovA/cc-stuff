@@ -1,12 +1,23 @@
 {
-  "description": "Keeps a partner agent from ending its turn while a message in the shared transcript is still waiting for its reply.",
+  "description": "Keeps a partner agent from ending its turn while a reply is owed or no wait is in flight, and tracks turns so a session only pauses once every agent has finished.",
   "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" hook-stop",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" hook-prompt",
             "timeout": 15
           }
         ]

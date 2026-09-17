@@ -1,9 +1,9 @@
 ---
 name: partner
-description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, pause or wake their loops, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
-argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | pause | wake | stop"
+description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, check whether they have finished, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
+argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | idle | stop"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch, Skill
-version: 0.19.0
+version: 0.20.0
 ---
 
 # Partner
@@ -55,7 +55,7 @@ Because partners run unprompted this is a rule they keep, not a wall they hit. T
 | `/partner` — alone, or `/partner <provider> [model] [effort]` | **start a new session** | `spawn --fresh` — archive the current session, then bring up **one** new partner on a clean slate |
 | `/partner add [provider ...]` | **add to the session in progress** | `spawn` *without* `--fresh` — another partner joins the ones already running; nothing is archived |
 | `/partner resume [id]` | bring a session back | `resume [--session <id>]` — every agent rebuilt and re-briefed from its transcript |
-| `/partner pause` · `wake` | stop every loop now · bring a paused session back | `pause` · `wake` |
+| `/partner idle` | who is still working, and whether the loops will pause | `idle [--after N]` |
 | `/partner sessions` · `list` · `baton <id>` · `stop` | inspect or manage | the matching command |
 
 The bare form is a *fresh* session because that is the common case: the user sat down to think a new problem through. Reach for `add` only when partners are already live and the user wants one more voice in that same argument.
@@ -206,9 +206,20 @@ The second must be **backgrounded** (the Bash tool with `run_in_background: true
 
 **Keep exactly one `wait` in flight.** Two split the inbox — each message is returned to whichever polls first, and one whose output is never read is a message never answered. A duplicate now idles instead of consuming and says so, ownership transfers if the owner dies, and `read` states whether a wait is already in flight for you. Check that line before arming another.
 
-### When the session goes idle
+### When every partner has finished
 
-Every idle `wait` cycle is a model turn spent deciding to wait again. So when the transcript has been quiet for **5 minutes and every running agent is sitting in `wait`**, the session **pauses**. If even one agent is out of `wait` (working, or answering the user), nothing pauses. Nor does anything pause on its own while a tab sits in a terminal that cannot be typed into, because nothing could wake that tab afterwards.
+Every idle `wait` cycle is a model turn spent deciding to wait again. So once **every running agent has finished its work** and **a minute has passed with no new work**, the session **pauses**. If even one agent is still working, everybody keeps looping.
+
+"Finished" is proven per agent, never assumed from silence. `wait` only pauses the session when all of these hold for every agent:
+
+- it is in `wait`. **Going back to `wait` is how an agent says it is done**, and every briefing says so: do not run it while work is still open;
+- it owes nobody a reply (`pending` is empty);
+- it is not mid-turn. For this session, a prompt hook opens the turn and the Stop hook closes it, because the background `wait` keeps running while you work;
+- it has stayed like that for the full minute since `wait` last handed it anything.
+
+Nor does it pause while a tab sits in a terminal that cannot be typed into, because a message could not wake that tab.
+
+So **before ending a turn, finish everything**: answer every message to you, complete and report the change, and check what you said you would check. Ending the turn is your declaration that you are done.
 
 While paused:
 
@@ -216,12 +227,11 @@ While paused:
 - **This session keeps its one background `wait`.** It sleeps without returning until the pause lifts, which costs nothing. Keep arming it at the end of every turn exactly as before.
 - `state`, `list` and `read` all say the session is paused. Paused partners are **idle, not gone**: they still count as present for the debate protocol.
 
-Resuming takes no extra step. Anything that is work lifts the pause and types a wake-up into every tab: `send`, `kickoff`, `claim`, `baton --to` or `spawn`. So when the user brings a new question, run the protocol as usual. To bring the partners back without giving them anything yet:
+**Resuming takes no step at all.** The first message to any agent wakes everyone and types a wake-up into every tab: your `send` or `claim`, a partner's, the user writing to this session (the prompt hook catches that), or `kickoff` / `spawn`. When the user brings a new question, run the protocol as usual.
 
 ```bash
-python "$P" wake                  # resume, and wake every tab
-python "$P" pause                 # pause now, whether idle or not
-python "$P" pause --after 900     # pause after 15 min of quiet; --after 0 = never
+python "$P" idle                  # who is still working, and why the loops have or have not paused
+python "$P" idle --after 300      # require 5 min instead of 1; --after 0 = never pause
 ```
 
 ### When a partner goes quiet
@@ -277,9 +287,8 @@ python "$P" read [--peek]                   # new messages; --peek keeps the cur
 python "$P" wait [--for id] [--timeout 90]  # block until addressed; partners use this
 python "$P" nudge [--id p2 | --all]         # wake agents that stopped looping
 python "$P" pending                         # messages you still owe a reply to
-python "$P" pause [--after N]               # stop every loop now; --after sets the idle threshold (0 = off)
-python "$P" wake                            # resume a paused session, wake every tab
-python "$P" hook-stop                        # internal: the Stop-hook backstop
+python "$P" idle [--after N]                # who is still working; --after sets the finished-for time (0 = never pause)
+python "$P" hook-stop | hook-prompt          # internal: the Stop and UserPromptSubmit hooks
 python "$P" claim [--force]                 # user just told YOU to act: take the baton
 python "$P" init --me-provider X --me-model M [--me-effort E] [--me-auto A]
                                             # rarely needed; spawn does this
@@ -291,7 +300,7 @@ Add `--json` to any command for machine-readable output.
 
 State lives in `.partner/` at the repo root — `chat.md` is the full transcript, readable at any time. `init` adds `.partner/` to `.git/info/exclude`, so it is ignored locally without touching a tracked `.gitignore`.
 
-A `Stop` hook (`hooks/hooks.json`) stops any agent — this session included — from ending a turn while a message to it or `@all` sits unanswered in `chat.md`; it points them at `read`/`send` first. The baton holder is exempt, own messages do not count, a paused tab agent is let go, and it fails open. `references/protocol.md` covers it.
+A `UserPromptSubmit` hook opens this session's turn (so nobody pauses while it works) and wakes a paused session when the user writes. A `Stop` hook (`hooks/hooks.json`) closes the turn, and stops any agent — this session included — from ending a turn while a message to it or `@all` sits unanswered in `chat.md`; it points them at `read`/`send` first. The baton holder is exempt, own messages do not count, a paused tab agent is let go, and it fails open. `references/protocol.md` covers it.
 
 ## Deeper reference
 
