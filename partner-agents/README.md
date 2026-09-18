@@ -210,9 +210,12 @@ Two things follow from a tab having exactly one input, and both are handled in t
 
 ## Documentation
 
+The script is `skills/partner/scripts/partner.py`, a thin entry point over the `partner_agents` package beside it. It uses only the standard library, and each module owns one concern (transcript, providers, terminals, idle pause, commands).
+
+
 - [`skills/partner/SKILL.md`](./skills/partner/SKILL.md) — the workflow
 - [`references/providers.md`](./skills/partner/references/providers.md) — provider flags and adding your own
-- [`references/protocol.md`](./skills/partner/references/protocol.md) — transcript format, state layout, and the Stop hook
+- [`references/protocol.md`](./skills/partner/references/protocol.md) — transcript format, state layout, the Stop hook, and where the code lives
 - [`references/terminals.md`](./skills/partner/references/terminals.md) — terminal detection per OS, and typing into a tab that went quiet
 - [`references/debate.md`](./skills/partner/references/debate.md) — opening a session and the debate loop
 - [`references/troubleshooting.md`](./skills/partner/references/troubleshooting.md) — symptoms, causes and fixes

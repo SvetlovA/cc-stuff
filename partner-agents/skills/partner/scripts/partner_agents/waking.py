@@ -1,0 +1,206 @@
+"""Waking an agent that stopped listening, by typing into its tab.
+
+A tab agent participates by blocking on `wait`. When it ends its turn instead
+-- because its shell tool cut a wait short, because a discussion concluded,
+or because the baton moved away -- nothing re-invokes it and the next thing
+said to it lands in a transcript nobody is reading.
+
+Claude Code agents have a Stop hook to catch that. Any other CLI may or may
+not have an equivalent, and this plugin cannot require one -- so the recovery
+comes from outside the agent entirely: type into its tab, exactly as the human
+would. That works whatever is running in it. Every terminal with a control CLI
+can do it, and `spawn` records which one owns each tab.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+from .presence import is_listening, last_seen
+from .state import read_pause
+from .terminals.detect import (
+    load_terminals, terminal_available, terminal_bin, terminal_order,
+)
+from .terminals.tabs import term_argv
+from .timing import NUDGE_WINDOW
+from .util import NL, age_seconds, dig_json, nag_throttled
+
+
+def silence_notice(sd: Path, roster: dict, who: str, wake: bool = False) -> str:
+    """One line about agents nothing is listening for, optionally waking them.
+
+    Delivered through `wait` and `read` because that is where every agent looks
+    constantly -- a partner that has gone deaf is otherwise invisible until
+    somebody notices their question was never answered.
+    """
+    silent = silent_agents(sd, roster, who)
+    if not silent:
+        return ""
+    if wake:
+        woke = [r["id"] for r in
+                (nudge_agent(sd, roster, p,
+                             "you stopped looping -- nobody is listening for you.")
+                 for p in silent) if r["nudged"]]
+        if woke:
+            return (f"{NL * 2}[{', '.join(woke)} had stopped listening; a wake-up "
+                    f"was typed into their tabs.]")
+    verb = "is" if len(silent) == 1 else "are"
+    return (f"{NL * 2}[{', '.join(silent)} {verb} not listening -- no `wait` is "
+            f"in flight. `nudge --id <id>` types a wake-up into the tab.]")
+
+
+def find_handle(spec: dict, title: str) -> str:
+    """Recover a tab's id from the terminal itself, by title.
+
+    Needed for an agent spawned before its handle was recorded, and for one
+    whose tab was recreated. `list` in the spec says how to ask -- without it
+    there is nothing to ask, and the nudge falls back to the manual path.
+    """
+    tmpl, dig = spec.get("list") or "", spec.get("list_handle") or ""
+    binary = terminal_bin(spec)
+    if not (tmpl and dig and binary):
+        return ""
+    argv = term_argv(tmpl, bin=binary, title=title)
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30)
+        if r.returncode != 0:
+            return ""
+        doc = json.loads(r.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return ""
+    # "result.terminals[].handle@title" -- a list to walk, the field to return,
+    # and the field to match the title against.
+    path, _, fields = dig.partition("[].")
+    field, _, key = fields.partition("@")
+    items = dig_json(doc, path, want=list) or []
+    for it in items:
+        if isinstance(it, dict) and str(it.get(key or "title", "")) == title:
+            return str(it.get(field, ""))
+    return ""
+
+
+def nudge_command(entry: dict, pid: str, text: str) -> list[str] | None:
+    """The argv that types `text` plus Enter into this agent's tab.
+
+    Which terminal owns the tab was recorded at spawn, and the terminal entry
+    itself says how to type into one -- so a terminal the user described in
+    their own file can be woken exactly like a built-in, and one that cannot be
+    typed into says so by having no `send` rather than by being special-cased
+    here.
+    """
+    title = entry.get("tab_title") or f"partner:{pid}"
+    specs = load_terminals(discover=True)
+    kind = entry.get("tab_kind") or ""
+    spec = specs.get(kind)
+    if not spec:
+        # No record of the terminal (an older roster, or a hand-started tab):
+        # the one we are inside now is the best guess available.
+        pick = next(((n, s) for n, s in terminal_order()
+                     if s.get("send") and terminal_available(s)[0]), None)
+        if not pick:
+            return None
+        kind, spec = pick
+    if not spec.get("send"):
+        return None
+    binary = terminal_bin(spec)
+    if not binary:
+        return None
+    handle = entry.get("tab_handle") or ""
+    if "{handle}" in spec["send"] and not handle:
+        handle = find_handle(spec, title)
+        if not handle:
+            return None
+    return term_argv(spec["send"], bin=binary, handle=handle, title=title,
+                     text=text, text_nl=text + NL)
+
+
+def nudge_text(pid: str, why: str) -> str:
+    """What gets typed into the tab.
+
+    It arrives in the agent's prompt exactly as if the human had typed it, so
+    it has to say that it is not the human -- otherwise a woken agent follows
+    the baton rule ("the human addressed me -> claim") and takes write
+    permission away from whoever actually has it. It also has to be harmless
+    when the CLI has already exited and a shell reads the line instead.
+    """
+    rel = f".partner/{pid}"
+    run = rel.replace("/", "\\") + "\\p.cmd" if os.name == "nt" else rel + "/p.sh"
+    return (f"continue -- automated wake-up from the partner transcript, NOT "
+            f"the human: {why} Do NOT claim the baton; nobody has given you an "
+            f"instruction. Run `{run} read`, answer what it shows with "
+            f"`{run} send`, then go back to `{run} wait` and keep looping.")
+
+
+def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
+                throttle: int = NUDGE_WINDOW) -> dict:
+    """Type a wake-up line into one agent's tab.
+
+    Throttled through a marker in the target's own directory rather than the
+    caller's, so three agents noticing the same silent partner in the same
+    minute produce one nudge between them, not three.
+    """
+    entry = (roster.get("partners") or {}).get(pid) or {}
+    if not entry:
+        return {"id": pid, "nudged": False, "why": "unknown agent"}
+    if (entry.get("kind") or "tab") == "session":
+        # The session agent has no tab to type into; its harness re-invokes it
+        # when its background `wait` returns, and its Stop hook catches the rest.
+        return {"id": pid, "nudged": False, "why": "session agent has no tab"}
+    if entry.get("status") != "running":
+        return {"id": pid, "nudged": False, "why": "not running"}
+    if throttle and nag_throttled(sd / pid / ".nudge", throttle):
+        # Somebody already woke it inside the window: handled, not a failure.
+        return {"id": pid, "nudged": False, "throttled": True,
+                "why": "nudged moments ago"}
+    argv = nudge_command(entry, pid, nudge_text(pid, why))
+    if not argv:
+        manual = entry.get("runner") or f"{sd / pid}/run.sh"
+        where = entry.get("tab") or "its window"
+        return {"id": pid, "nudged": False,
+                "why": f"{where} cannot be typed into from outside (`terminals` "
+                       f"says which can) -- type \"continue\" in {pid}'s tab "
+                       f"yourself, or restart it with: {manual}"}
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"id": pid, "nudged": False, "why": f"{type(exc).__name__}"}
+    if r.returncode != 0:
+        return {"id": pid, "nudged": False,
+                "why": (r.stderr or r.stdout or "").strip()[:200] or "send failed"}
+    return {"id": pid, "nudged": True, "why": why}
+
+
+def silent_agents(sd: Path, roster: dict, who: str,
+                  targets: list[str] | None = None) -> list[str]:
+    """Running tab agents that nothing is listening on behalf of.
+
+    `is_listening` answers "a `wait` is in flight right now", which is the only
+    question that matters here -- an agent that just replied and then stopped
+    looks busy by every other measure, and is exactly the one about to miss the
+    next message.
+    """
+    out = []
+    if read_pause(sd):
+        # Not listening on purpose. Waking them is what lifting the pause does;
+        # waking them one at a time would just undo the pause for nothing.
+        return out
+    for pid, entry in (roster.get("partners") or {}).items():
+        if pid == who or entry.get("status") != "running":
+            continue
+        if (entry.get("kind") or "tab") == "session":
+            continue
+        if targets is not None and pid not in targets:
+            continue
+        if is_listening(sd, roster, pid):
+            continue
+        age = age_seconds(last_seen(sd, pid))
+        # Give a newly spawned agent time to reach its first `wait` before
+        # declaring it deaf -- it is still reading its briefing.
+        if age is not None and age < 30:
+            continue
+        out.append(pid)
+    return out

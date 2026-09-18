@@ -353,6 +353,29 @@ There is no mechanical round limit, because no supervising process exists to enf
 
 That is the right place for the rule. A deadlock between two models is a genuine signal that the question is a judgement call, and the human is the one who should break it; grinding on produces confident-sounding convergence that reflects stamina rather than correctness.
 
+## Where the code lives
+
+`scripts/partner.py` is only the entry point. Every wrapper, hook and briefing calls that path, including `.partner/<id>/p.cmd` files written by older versions, so it never moves. The code is in the `partner_agents` package beside it. Standard library only, and each module imports only from the layers above it in this list:
+
+| Module | Holds |
+|--------|-------|
+| `timing.py` | every clock: `WAIT_TIMEOUT`, `MARKER_STALE`, `REDELIVER_AFTER`, `LIVE_WINDOW`, `IDLE_PAUSE`, `REARM_GAP`, ... |
+| `util.py` | helpers with no partner knowledge: `utcnow`, `age_seconds`, `nag_throttled`, `run_command`, `emit` |
+| `state.py` | `.partner/` paths, `roster.json`, `me_id`, `baton_of`, the per-agent wrappers, `paused.json` |
+| `transcript.py` | `chat.md`: `append_msg`, `read_new`, `commit_cursor`, `set_floor`, `pending_for`, `dropped_for` |
+| `prompts.py` | every agent-facing text: `SEED`, `LOOP_TAB`, `LOOP_SESSION`, `EXPLORE_BRIEF`, `OPENING`, `PAUSE_NOTICE` |
+| `providers/` | `recipes`, `binaries`, `probe`, `discovery`, `overrides`, `models`, `resolve`, `validate`, `launch` |
+| `terminals/` | `catalog` (the terminal table), `detect` (finding and probing terminals), `tabs` (opening a tab) |
+| `presence.py` | the `waiting` marker, `is_listening`, `lastseen`, `liveness` |
+| `waking.py` | `nudge_command`, `nudge_agent`, `silent_agents`, `silence_notice` |
+| `briefing.py` | `boot_prompt`, `build_seed`, `write_briefing` |
+| `sessions.py` | `archive_current`, `read_sessions`, `relaunch` |
+| `idle.py` | `agent_busy`, `idle_verdict`, `pause_session`, `mark_active` |
+| `commands/` | one `cmd_*` per subcommand: `session`, `messaging`, `status`, `discovery`, `hooks` |
+| `cli.py` | the argument parser |
+
+Agent-facing wording is edited in `prompts.py`, and timings are tuned in `timing.py`. To add a subcommand, write its `cmd_*` in `commands/` and register it in `cli.py`.
+
 ## Failure modes
 
 **A new agent nobody addresses.** `spawn` announces arrivals in the transcript (`system` message naming the id), so the others learn to address it. If that message is missing, the spawn did not complete.
