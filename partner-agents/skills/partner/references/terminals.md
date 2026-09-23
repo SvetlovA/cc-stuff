@@ -69,6 +69,7 @@ Detection is per entry, not a chain of ifs in code:
 | `path` | a path that must exist (an app bundle, say) |
 | `platform` | `nt`, `darwin`, `linux` |
 | `term` | strings matched against `$TERM` / `$TERM_PROGRAM` → this is the terminal on screen |
+| `self_handle` | env var the terminal sets to the id of the tab a process runs in. It is how the agent that ran `init` gets a tab on record, so a pause stops it and a message wakes it like any spawned agent |
 | `list` + `list_handle` / `list_titles` | how to enumerate live tabs, for recovering a handle by title and for corroborating liveness |
 
 ## Selection order

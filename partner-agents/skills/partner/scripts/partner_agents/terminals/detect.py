@@ -210,6 +210,21 @@ def load_terminals(discover: bool = False) -> dict:
     return merged
 
 
+def own_tab() -> dict:
+    """The tab this process runs in, when its terminal says which one.
+
+    A terminal whose entry names a `self_handle` env var hands every process it
+    runs the id of its own tab. That is how the agent that started the session
+    -- which no `spawn` ever opened a tab for -- becomes wakeable exactly like
+    the partners it spawned.
+    """
+    for name, spec in load_terminals().items():
+        handle = os.environ.get(spec.get("self_handle") or "", "").strip()
+        if handle and spec.get("send"):
+            return {"kind": name, "handle": handle}
+    return {}
+
+
 def terminal_bin(spec: dict) -> str | None:
     """The binary this entry drives, if it is here at all."""
     name = spec.get("bin") or (spec["open"].split() or [""])[0]

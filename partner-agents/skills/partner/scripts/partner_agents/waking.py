@@ -18,10 +18,10 @@ import os
 import subprocess
 from pathlib import Path
 
-from .presence import is_listening, last_seen
-from .state import read_pause
+from .presence import is_listening, last_seen, turn_open
+from .state import read_pause, save_roster
 from .terminals.detect import (
-    load_terminals, terminal_available, terminal_bin, terminal_order,
+    load_terminals, own_tab, terminal_available, terminal_bin, terminal_order,
 )
 from .terminals.tabs import term_argv
 from .timing import NUDGE_WINDOW
@@ -82,6 +82,57 @@ def find_handle(spec: dict, title: str) -> str:
     return ""
 
 
+_TYPABLE: dict[str, bool] = {}
+
+
+def adopt_own_tab(sd: Path, roster: dict, who: str) -> None:
+    """Record the tab the calling agent runs in, if its terminal says.
+
+    `spawn` records this for every tab it opens. The agent that ran `init` was
+    never spawned, so without this it had no tab on record: it could not be
+    woken by typing, and had to keep a `wait` alive through every pause while
+    the others stopped. Called from that agent's own commands, so the handle is
+    always the terminal it is in right now -- a resumed session in a new tab
+    corrects the record the first time it waits.
+    """
+    entry = (roster.get("partners") or {}).get(who)
+    tab = own_tab()
+    if not entry or not tab:
+        return
+    if (entry.get("tab_kind"), entry.get("tab_handle")) == (tab["kind"], tab["handle"]):
+        return
+    entry["tab_kind"], entry["tab_handle"] = tab["kind"], tab["handle"]
+    _TYPABLE.pop(who, None)
+    save_roster(sd, roster)
+
+
+def typable(roster: dict, pid: str) -> bool:
+    """Can a wake-up be typed into this agent's tab from outside?
+
+    Cached per process: resolving a terminal may probe it, and a session that
+    cannot pause re-asks this every IDLE_CHECK.
+    """
+    if pid not in _TYPABLE:
+        entry = (roster.get("partners") or {}).get(pid) or {}
+        _TYPABLE[pid] = nudge_command(entry, pid, "wake") is not None
+    return _TYPABLE[pid]
+
+
+def sleeps_through_pause(roster: dict, pid: str) -> bool:
+    """Does this agent keep a sleeping `wait` through a pause instead of stopping?
+
+    Every agent stops on a pause and is woken by typing into its tab. The one
+    exception is an agent nobody can type into whose `wait` is a background
+    process of its own harness -- the session agent outside a terminal like
+    Orca. Its `wait` can sleep for free, and it is the only way that agent
+    hears a resume that starts elsewhere. A tab agent cannot do the same: its
+    `wait` is a foreground command the CLI kills at its cap, and every re-arm
+    is a model turn.
+    """
+    entry = (roster.get("partners") or {}).get(pid) or {}
+    return (entry.get("kind") or "tab") == "session" and not typable(roster, pid)
+
+
 def nudge_command(entry: dict, pid: str, text: str) -> list[str] | None:
     """The argv that types `text` plus Enter into this agent's tab.
 
@@ -95,6 +146,10 @@ def nudge_command(entry: dict, pid: str, text: str) -> list[str] | None:
     specs = load_terminals(discover=True)
     kind = entry.get("tab_kind") or ""
     spec = specs.get(kind)
+    if not spec and (entry.get("kind") or "tab") == "session":
+        # The session agent's tab was never opened by us, so it has no title to
+        # look up by; guessing would type into somebody else's tab.
+        return None
     if not spec:
         # No record of the terminal (an older roster, or a hand-started tab):
         # the one we are inside now is the best guess available.
@@ -145,10 +200,6 @@ def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
     entry = (roster.get("partners") or {}).get(pid) or {}
     if not entry:
         return {"id": pid, "nudged": False, "why": "unknown agent"}
-    if (entry.get("kind") or "tab") == "session":
-        # The session agent has no tab to type into; its harness re-invokes it
-        # when its background `wait` returns, and its Stop hook catches the rest.
-        return {"id": pid, "nudged": False, "why": "session agent has no tab"}
     if entry.get("status") != "running":
         return {"id": pid, "nudged": False, "why": "not running"}
     if throttle and nag_throttled(sd / pid / ".nudge", throttle):
@@ -191,7 +242,10 @@ def silent_agents(sd: Path, roster: dict, who: str,
     for pid, entry in (roster.get("partners") or {}).items():
         if pid == who or entry.get("status") != "running":
             continue
-        if (entry.get("kind") or "tab") == "session":
+        if (entry.get("kind") or "tab") == "session" and (
+                turn_open(sd, pid) or not typable(roster, pid)):
+            # Mid-turn with the human, its background `wait` may be between
+            # runs; and with no tab on record, its Stop hook is all there is.
             continue
         if targets is not None and pid not in targets:
             continue

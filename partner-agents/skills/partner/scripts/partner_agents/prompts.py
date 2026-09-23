@@ -326,11 +326,13 @@ is empty), the change finished and reported, nothing you said you would check
 left unchecked. A hook marks your turn open from the human's message until it
 really ends, so the others never pause while you are mid-turn.
 
-While paused your background `wait` does not stop -- it sleeps without
-returning, which costs nothing. So step 4 still holds: exactly one background
-`wait`. Nothing needs doing to resume: the first message to any agent -- your
-`send` or `claim`, the human writing to you or to a tab -- wakes everyone and
-types a wake-up into their tabs.
+While paused you stop exactly like everyone else: when your `wait` returns
+saying the session is paused, do NOT arm another -- end your turn. That is the
+one exception to step 4, and the Stop hook allows it. The next message to any
+agent types a wake-up into your tab, as it does for theirs. (Only if that `wait`
+says it is *sleeping* instead -- your tab cannot be typed into -- does step 4
+still hold.) Nothing needs doing to resume: the first message to any agent --
+your `send` or `claim`, the human writing to you or to a tab -- wakes everyone.
 
 `read` and `wait` tell you when another agent has no `wait` in flight -- a tab
 CLI with no Stop hook of its own that ended its turn and is now deaf. `{run}
@@ -343,10 +345,12 @@ partner has nothing to say.
 PAUSE_NOTICE = """**Session paused: {why}.** Loops stop here, so finished agents
 stop spending a model turn every cycle re-arming `wait`.
 
-- **Tab agents:** do NOT run `wait` again. End your turn now. The next message
-  to any of us types a wake-up line into your tab.
-- **Session agent:** arm your one background `wait` as usual. While paused it
-  sleeps without returning, so it costs nothing.
+- **Every agent** -- whoever started the session included: do NOT run `wait`
+  again. End your turn now. The next message to any of us types a wake-up line
+  into your tab.
+- **Only if your `wait` says it is sleeping** (your tab cannot be typed into):
+  keep that one background `wait` armed. It does not return while paused, so it
+  costs nothing.
 
 Nothing needs doing to resume: the first message to any agent -- `send`,
 `kickoff`, `claim`, `spawn`, or the human writing to one of us -- wakes everyone.

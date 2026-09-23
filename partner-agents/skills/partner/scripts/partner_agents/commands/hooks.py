@@ -17,6 +17,7 @@ from ..presence import is_listening
 from ..state import baton_of, load_roster, me_id, read_pause, state_dir
 from ..transcript import pending_for, render
 from ..util import NL, nag_throttled, unlink_quietly, write_float
+from ..waking import sleeps_through_pause
 
 
 def hook_prompt(sd: Path, roster: dict, who: str, prompt: str) -> None:
@@ -139,10 +140,11 @@ def stop_block_reason(sd: Path, roster: dict, who: str, entry: dict) -> str:
     # enforces it.
     if is_listening(sd, roster, who):
         return ""
-    if read_pause(sd) and (entry.get("kind") or "tab") != "session":
-        # Paused: a tab agent leaving the loop is the point. The session agent
-        # is still held to its one background wait -- it sleeps for free, and
-        # it is how this session hears a resume that starts in a tab.
+    if read_pause(sd) and not sleeps_through_pause(roster, who):
+        # Paused: leaving the loop is the point, for this session exactly as
+        # for a tab -- the resume types a wake-up into its tab. Only an agent
+        # nobody can type into is still held to its one sleeping background
+        # wait, which is how it hears a resume that starts elsewhere.
         return ""
     if nag_throttled(sd / who / ".stop-nag-live", 120):
         return ""

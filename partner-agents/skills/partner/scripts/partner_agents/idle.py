@@ -4,9 +4,11 @@ An idle `wait` that times out hands control back to its model, which spends a
 turn deciding to run `wait` again. One cycle is cheap; three agents cycling
 every 90s through a lunch break is most of the bill for the session, and none
 of it buys anything. So once every agent has finished its work, the session
-pauses: tab agents end their turn instead of re-arming, and the session
-agent's background `wait` sleeps without returning -- a process polling a
-file costs nothing, a model turn does.
+pauses: every agent ends its turn instead of re-arming `wait` -- the one
+that started the session exactly like the ones it spawned -- and the first
+message to any of them types a wake-up into every tab. Only an agent whose tab
+cannot be typed into keeps its background `wait`, sleeping without returning:
+a process polling a file costs nothing, a model turn does.
 
 "Finished" has to be proven per agent, because pausing an agent mid-work
 drops whatever it was about to say. Going back to `wait` is how an agent
@@ -17,7 +19,7 @@ continuous IDLE_PAUSE in `wait` since the last time `wait` handed it work.
 Resuming needs nobody: the first message to any agent -- `send`, `kickoff`,
 `claim`, `spawn`, or the human writing to a Claude agent -- lifts the pause
 and types a wake-up into every tab. That is also why a session never pauses
-on its own while one of its tabs sits in a terminal that cannot be typed into.
+while a tab agent sits in a terminal that cannot be typed into.
 """
 from __future__ import annotations
 
@@ -25,18 +27,16 @@ import json
 import time
 from pathlib import Path
 
-from .presence import is_listening
+from .presence import is_listening, turn_open
 from .prompts import PAUSE_NOTICE
 from .state import baton_of, pause_after
-from .timing import REARM_GAP, TURN_STALE
+from .timing import REARM_GAP
 from .transcript import append_msg, pending_for, tail_msgs
 from .util import (
     NL, age_seconds, nag_throttled, read_float, unlink_quietly, utcnow, write_float,
 )
-from .waking import nudge_agent, nudge_command
+from .waking import nudge_agent, sleeps_through_pause, typable
 
-
-_WAKEABLE: dict[str, bool] = {}
 
 
 def note_idle(sd: Path, who: str) -> None:
@@ -59,41 +59,11 @@ def idle_for(sd: Path, pid: str) -> float | None:
     return None if since is None else time.time() - since
 
 
-def turn_open(sd: Path, pid: str) -> bool:
-    """Is a Claude Code session agent in the middle of a turn?
-
-    Its background `wait` stays in flight while it works on what the human
-    asked, so `is_listening` cannot tell a session agent that is done from one
-    that is busy. The prompt hook opens the turn, the Stop hook closes it.
-    """
-    opened = read_float(sd / pid / "turn")
-    return opened is not None and time.time() - opened < TURN_STALE
-
-
-def session_done_without_wait(sd: Path, roster: dict, pid: str) -> bool:
-    """A session agent with no `wait` armed: does that still count as finished?
-
-    For a tab agent, "not in `wait`" means a model turn is running. A session
-    agent says the same thing with its turn marker, and with that marker
-    closed it is simply sitting at the prompt, and the human's next message
-    wakes it through the prompt hook. Treating that state as "still working"
-    blocks every pause for good: this is how p2 kept looping for ten minutes
-    after p1 stopped re-arming its wait.
-    """
-    entry = roster["partners"].get(pid) or {}
-    if (entry.get("kind") or "tab") != "session":
-        return False
-    # TODO(you): return whether a session agent whose turn is closed but who
-    # has no `wait` in flight should count as finished for the pause verdict.
-    return False
-
-
 def agent_busy(sd: Path, roster: dict, pid: str) -> str:
     """Why this agent has not finished its work -- or "" when it has."""
     if turn_open(sd, pid):
         return "mid-turn"
-    if (not is_listening(sd, roster, pid)
-            and not session_done_without_wait(sd, roster, pid)):
+    if not is_listening(sd, roster, pid):
         return "not in `wait` -- still working"
     owed = pending_for(sd, roster, pid)
     if owed:
@@ -106,14 +76,7 @@ def agent_busy(sd: Path, roster: dict, pid: str) -> str:
 
 def wakeable(roster: dict, pid: str) -> bool:
     """Can this agent be brought back from a pause without the human?"""
-    entry = roster["partners"].get(pid) or {}
-    if (entry.get("kind") or "tab") == "session":
-        return True              # its wait sleeps through the pause instead
-    if pid not in _WAKEABLE:
-        # Cached per process: resolving a terminal may probe it, and a session
-        # that cannot pause re-asks this every IDLE_CHECK.
-        _WAKEABLE[pid] = nudge_command(entry, pid, "wake") is not None
-    return _WAKEABLE[pid]
+    return typable(roster, pid) or sleeps_through_pause(roster, pid)
 
 
 def last_activity(sd: Path, roster: dict) -> float:
@@ -164,8 +127,9 @@ def idle_verdict(sd: Path, roster: dict) -> tuple[bool, str]:
 def pause_banner(paused: dict, sleeper: bool) -> str:
     since = paused.get("since", "?")
     if sleeper:
-        return (f"[session paused since {since}: every agent finished. Your "
-                f"background `wait` sleeps until the next message and costs "
+        return (f"[session paused since {since}: every agent finished. Your tab "
+                f"cannot be typed into, so this background `wait` is sleeping "
+                f"until the next message instead of stopping, and costs "
                 f"nothing -- keep exactly one armed. Your first `send` or "
                 f"`claim` resumes everyone.]")
     return (f"[session paused since {since}: every agent finished. Do NOT run "
@@ -212,7 +176,7 @@ def mark_active(sd: Path, roster: dict, who: str, why: str) -> dict:
     for pid, entry in roster["partners"].items():
         if pid == who or entry.get("status") != "running":
             continue
-        if (entry.get("kind") or "tab") == "session" or is_listening(sd, roster, pid):
+        if is_listening(sd, roster, pid):
             continue             # the post above already reaches a live wait
         age = age_seconds(entry.get("started"))
         if age is not None and age < 30:

@@ -15,8 +15,8 @@ from pathlib import Path
 
 from .state import me_id, read_pause
 from .terminals.tabs import tab_titles
-from .timing import LIVE_WINDOW, MARKER_STALE
-from .util import age_seconds, utcnow
+from .timing import LIVE_WINDOW, MARKER_STALE, TURN_STALE
+from .util import age_seconds, read_float, utcnow
 
 
 def read_marker(sd: Path, who: str) -> dict:
@@ -85,6 +85,17 @@ def is_listening(sd: Path, roster: dict, who: str) -> bool:
         age = age_seconds(last_seen(sd, who))
         return age is not None and age <= MARKER_STALE
     return False
+
+
+def turn_open(sd: Path, pid: str) -> bool:
+    """Is a Claude Code session agent in the middle of a turn?
+
+    Its background `wait` stays in flight while it works on what the human
+    asked, so `is_listening` cannot tell a session agent that is done from one
+    that is busy. The prompt hook opens the turn, the Stop hook closes it.
+    """
+    opened = read_float(sd / pid / "turn")
+    return opened is not None and time.time() - opened < TURN_STALE
 
 
 def last_seen(sd: Path, pid: str) -> str | None:

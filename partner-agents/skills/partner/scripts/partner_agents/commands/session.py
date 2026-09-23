@@ -20,6 +20,7 @@ from ..state import (
 )
 from ..terminals.tabs import open_tab, write_runner
 from ..transcript import append_msg, set_floor, tail_msgs
+from ..waking import adopt_own_tab
 from ..util import NL, emit, unlink_quietly, utcnow, write_float
 
 
@@ -61,6 +62,7 @@ def cmd_init(args) -> int:
     if roster.get("baton") not in roster["partners"]:
         roster["baton"] = me
     save_roster(sd, roster)
+    adopt_own_tab(sd, roster, me)        # so a pause can stop it like the rest
 
     write_wrappers(sd, SCRIPT)            # shared, for humans
     write_wrappers(sd, SCRIPT, me)        # this agent's own
@@ -273,6 +275,9 @@ def cmd_resume(args) -> int:
         roster["partners"][me]["kind"] = "session"
         roster["partners"][me]["status"] = "running"
         roster["partners"][me]["tab"] = "this session"
+        # The tab it had belongs to the old run; the one it is in now is known.
+        roster["partners"][me].pop("tab_kind", None)
+        roster["partners"][me].pop("tab_handle", None)
         write_wrappers(sd, script, me)
         write_briefing(sd, me, roster, root, script, None, kind="session")
 
@@ -304,6 +309,8 @@ def cmd_resume(args) -> int:
 
     write_wrappers(sd, script)
     save_roster(sd, roster)
+    if me:
+        adopt_own_tab(sd, roster, me)
     what = f"session {args.session}" if args.session else "the current session"
     append_msg(sd, "system", "@all",
                f"{what.capitalize()} resumed by **{me or me_id(roster)}**. "

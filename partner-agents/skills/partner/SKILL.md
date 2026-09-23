@@ -223,8 +223,8 @@ So **before ending a turn, finish everything**: answer every message to you, com
 
 While paused:
 
-- **Tab agents** end their turn instead of re-arming `wait`. Their `wait` returns straight away saying so, and the Stop hook lets them go.
-- **This session keeps its one background `wait`.** It sleeps without returning until the pause lifts, which costs nothing. Keep arming it at the end of every turn exactly as before.
+- **Every agent ends its turn, this session included.** Its `wait` returns saying the session is paused. Do not arm another; end the turn, and the Stop hook lets it go. The resume types a wake-up into this session's tab, as it does for the partners.
+- **The exception:** if `wait` says it is *sleeping*, this session's tab cannot be typed into (it is not running in a terminal like Orca). Then keep that one background `wait` armed. It does not return while paused, so it costs nothing.
 - `state`, `list` and `read` all say the session is paused. Paused partners are **idle, not gone**: they still count as present for the debate protocol.
 
 **Resuming takes no step at all.** The first message to any agent wakes everyone and types a wake-up into every tab: your `send` or `claim`, a partner's, the user writing to this session (the prompt hook catches that), or `kickoff` / `spawn`. When the user brings a new question, run the protocol as usual.

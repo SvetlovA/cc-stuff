@@ -53,6 +53,7 @@ TERMINALS: dict[str, dict] = {
                 "--command {shell} --json",
         "handle": "json:result.terminal.handle",
         "send": "{bin} terminal send --terminal {handle} --text {text} --enter",
+        "self_handle": "ORCA_TERMINAL_HANDLE",
         "list": "{bin} terminal list --json",
         "list_handle": "result.terminals[].handle@title",
         "list_titles": "result.terminals[].title",

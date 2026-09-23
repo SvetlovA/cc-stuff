@@ -21,7 +21,9 @@ from ..transcript import (
     read_new, render, tail_msgs,
 )
 from ..util import NL, age_seconds, emit, nag_throttled
-from ..waking import nudge_agent, silence_notice, silent_agents
+from ..waking import (
+    adopt_own_tab, nudge_agent, silence_notice, silent_agents, sleeps_through_pause,
+)
 
 
 def cmd_wait(args) -> int:
@@ -36,11 +38,14 @@ def cmd_wait(args) -> int:
     roster = load_roster(sd)
     who = args.who or me_id(roster)
     deadline = time.time() + args.timeout
-    # The session agent's wait is a background process of its harness, so it can
-    # sleep through a pause for free; a tab agent's wait is a model turn every
-    # cycle, so it has to stop instead.
-    sleeper = ((roster["partners"].get(who) or {}).get("kind") or "tab") == "session"
+    # Whoever runs this is in its own tab right now; recording it is what lets a
+    # pause stop this agent and a message type it awake again, like any other.
+    adopt_own_tab(sd, roster, who)
+    # Only an agent that cannot be typed awake keeps a wait through a pause --
+    # see sleeps_through_pause. Everyone else stops, whoever started the session.
+    sleeper = sleeps_through_pause(roster, who)
     next_idle = 0.0              # check at once: a 10s-capped wait never reaches 15
+    announced = False            # a sleeper says once that it is sleeping
     # Say what this command is doing *before* blocking, and flush it. Every CLI
     # caps how long a shell command may run, and a capped wait that has printed
     # nothing looks to the agent like a command that does not work, which is how
@@ -152,6 +157,9 @@ def cmd_wait(args) -> int:
             if paused:
                 # Sleeping through the pause: no deadline, so no return, so no
                 # model turn. Lifting the pause posts a message, which ends it.
+                if not announced and not args.json:
+                    print(pause_banner(paused, sleeper=True), flush=True)
+                announced = True
                 time.sleep(args.poll)
                 continue
             if time.time() >= deadline:
@@ -369,7 +377,7 @@ def cmd_read(args) -> int:
     # inbox, and until now there was no way to check except guessing.
     mine = read_marker(sd, who)
     paused = read_pause(sd)
-    sleeper = ((roster["partners"].get(who) or {}).get("kind") or "tab") == "session"
+    sleeper = sleeps_through_pause(roster, who)
     if paused and not (sleeper and not marker_live(mine)):
         listening = NL * 2 + pause_banner(paused, sleeper)
     elif marker_live(mine):
