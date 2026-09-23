@@ -23,14 +23,18 @@ def hook_prompt(sd: Path, roster: dict, who: str, prompt: str) -> None:
     """UserPromptSubmit: a turn starts, and a human message resumes the session.
 
     The boot prompt and a wake-up line land here too, and neither is the human
-    writing -- both disown themselves in their first words.
+    writing -- both disown themselves in their first words. So does a finished
+    background command: the harness re-invokes the model with a
+    <task-notification> prompt, and that is how the session agent's own `wait`
+    returning used to count as the human and lift the pause it had just seen.
     """
     entry = roster["partners"].get(who) or {}
     if (entry.get("kind") or "tab") == "session":
         write_float(sd / who / "turn", time.time())
         break_idle(sd, who)
     automated = prompt.lstrip().startswith(
-        ("continue -- automated wake-up", "[automated launch message"))
+        ("continue -- automated wake-up", "[automated launch message",
+         "<task-notification>"))
     if not automated and read_pause(sd):
         mark_active(sd, roster, who, "was written to by the human")
 

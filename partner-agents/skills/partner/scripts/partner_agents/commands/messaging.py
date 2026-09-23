@@ -9,8 +9,8 @@ import time
 from pathlib import Path
 
 from ..idle import (
-    break_idle, idle_verdict, mark_active, note_idle, pause_banner, pause_session,
-    resume_note,
+    break_idle, idle_verdict, is_pause_notice, mark_active, note_idle, pause_banner,
+    pause_session, resume_note,
 )
 from ..presence import marker_live, read_marker, touch_seen, write_marker
 from ..prompts import EXPLORE_BRIEF, OPENING
@@ -90,6 +90,13 @@ def cmd_wait(args) -> int:
             write_marker(sd, who, token, deadline)   # heartbeat
             touch_seen(sd, who)          # still here, still listening
             msgs, end = read_new(sd, who)
+            if sleeper and msgs and all(is_pause_notice(m) for m in msgs):
+                # The notice tells tab agents to stop. Handing it to the session
+                # agent would complete its background wait, and the harness
+                # re-invokes the model for that -- a turn spent being told to
+                # sleep, which is the opposite of pausing. Swallow it and sleep.
+                commit_cursor(sd, who, end)
+                msgs = []
             if msgs:
                 roster = load_roster(sd)
                 if args.json:
@@ -141,7 +148,7 @@ def cmd_wait(args) -> int:
                 next_idle = time.time() + IDLE_CHECK
                 ok, why = idle_verdict(sd, roster)
                 if ok and pause_session(sd, roster, who, why):
-                    continue     # the notice is handed over like any message
+                    continue     # tab agents get the notice like any message
             if paused:
                 # Sleeping through the pause: no deadline, so no return, so no
                 # model turn. Lifting the pause posts a message, which ends it.

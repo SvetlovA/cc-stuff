@@ -46,6 +46,8 @@
 
 If `idle` says a tab `could not be woken`, it runs in a terminal that cannot be typed into (`terminals` says which), and pausing it would strand it. That is deliberate.
 
+**The session pauses and resumes itself within seconds ("p1 was written to by the human").** This was fixed in 0.20.2. Before that, the Claude Code session's background `wait` returned on the pause notice. The `<task-notification>` that re-invoked the model then passed through the prompt hook as a human message and lifted the pause. Now the session's `wait` sleeps through the notice, and the prompt hook ignores task notifications. If it still happens, the installed plugin is older than 0.20.2.
+
 **A paused partner did not come back.** The resume nudge types into its tab, so this is the same problem as any failed nudge. `send` prints `could not wake: <id> (<why>)`. Type "continue" in that tab, or `nudge --id <id>`.
 
 **Partner stopped looping.** Interactive agents sometimes end their turn instead of running `wait` again — most often right after a discussion concludes, or after the baton moves to someone else. `.partner/<id>/waiting` exists only while a `wait` is actually polling, so its absence is the check. `nudge --id <id>` types a wake-up into the tab; `send` does it automatically for a recipient that is not listening; `read` and `wait` name any agent nothing is listening for. For a Claude Code tab or the session agent the Stop hook blocks that turn from ending; any other CLI may have no equivalent, which is why the nudge exists — it works regardless of what is running in the tab.

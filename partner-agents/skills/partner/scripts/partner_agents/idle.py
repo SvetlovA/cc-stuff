@@ -70,11 +70,30 @@ def turn_open(sd: Path, pid: str) -> bool:
     return opened is not None and time.time() - opened < TURN_STALE
 
 
+def session_done_without_wait(sd: Path, roster: dict, pid: str) -> bool:
+    """A session agent with no `wait` armed: does that still count as finished?
+
+    For a tab agent, "not in `wait`" means a model turn is running. A session
+    agent says the same thing with its turn marker, and with that marker
+    closed it is simply sitting at the prompt, and the human's next message
+    wakes it through the prompt hook. Treating that state as "still working"
+    blocks every pause for good: this is how p2 kept looping for ten minutes
+    after p1 stopped re-arming its wait.
+    """
+    entry = roster["partners"].get(pid) or {}
+    if (entry.get("kind") or "tab") != "session":
+        return False
+    # TODO(you): return whether a session agent whose turn is closed but who
+    # has no `wait` in flight should count as finished for the pause verdict.
+    return False
+
+
 def agent_busy(sd: Path, roster: dict, pid: str) -> str:
     """Why this agent has not finished its work -- or "" when it has."""
     if turn_open(sd, pid):
         return "mid-turn"
-    if not is_listening(sd, roster, pid):
+    if (not is_listening(sd, roster, pid)
+            and not session_done_without_wait(sd, roster, pid)):
         return "not in `wait` -- still working"
     owed = pending_for(sd, roster, pid)
     if owed:
@@ -154,6 +173,11 @@ def pause_banner(paused: dict, sleeper: bool) -> str:
             f"the loop is right: the next message to any of us types a wake-up "
             f"into your tab. If the human writes to you meanwhile, `claim` "
             f"first -- that resumes everyone.]")
+
+
+def is_pause_notice(m: dict) -> bool:
+    return (m.get("from") == "system"
+            and m.get("body", "").startswith(PAUSE_NOTICE.split("{why}")[0]))
 
 
 def pause_session(sd: Path, roster: dict, by: str, why: str) -> bool:
