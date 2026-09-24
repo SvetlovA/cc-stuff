@@ -242,7 +242,7 @@ A tab agent whose CLI ended its turn is unreachable — nothing re-invokes it, a
 python "$P" nudge [--id p2]        # one, or everyone who stopped listening
 ```
 
-`send` does it automatically for a recipient that is not listening, so a message to a stalled partner wakes it instead of vanishing. How to type into a tab comes from the same terminal entry that opened it, so a terminal described by the user is woken like a built-in; one that cannot be typed into says so and `nudge` prints the command that restarts the agent, which is what to relay. Wake-ups never move the baton. `references/terminals.md`.
+`send` does it automatically for a recipient that is not listening, so a message to a stalled partner wakes it instead of vanishing. How to type into a tab comes from the same terminal entry that opened it, so a terminal described by the user is woken like a built-in; one that cannot be typed into says so and `nudge` prints the command that restarts the agent, which is what to relay. Wake-ups never move the baton. After three wake-ups an agent ignores, its CLI has exited: the typing stops, a system message says so, and `restart --id <id>` relaunches it. `references/terminals.md`.
 
 ## The debate protocol
 
@@ -286,6 +286,8 @@ python "$P" send --to @all --text "..." [--wait 240]   # --from defaults to you
 python "$P" read [--peek]                   # new messages; --peek keeps the cursor
 python "$P" wait [--for id] [--timeout 90]  # block until addressed; partners use this
 python "$P" nudge [--id p2 | --all]         # wake agents that stopped looping
+python "$P" restart --id p2                 # relaunch an agent whose CLI exited
+python "$P" unwait                          # stop your own wait -- never kill by pattern
 python "$P" pending                         # messages you still owe a reply to
 python "$P" idle [--after N]                # who is still working; --after sets the finished-for time (0 = never pause)
 python "$P" hook-stop | hook-prompt          # internal: the Stop and UserPromptSubmit hooks

@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import signal
 import sys
 import time
 from pathlib import Path
@@ -20,7 +22,9 @@ from ..transcript import (
     append_msg, baton_banner, commit_cursor, dropped_for, parse_msgs, pending_for,
     read_new, render, tail_msgs,
 )
-from ..util import NL, age_seconds, emit, nag_throttled
+from ..util import (
+    NL, age_seconds, emit, nag_throttled, process_cmdline, unlink_quietly,
+)
 from ..waker import ensure_waker
 from ..waking import (
     adopt_own_tab, nudge_agent, silence_notice, silent_agents, sleeps_through_pause,
@@ -242,6 +246,46 @@ def cmd_claim(args) -> int:
                f"hear what follows.", who)
     emit(args, {"baton": who, "previous": prev, "changed": True, **res},
          f"baton: {prev} -> {who} (you may edit now){resume_note(res)}")
+    return 0
+
+
+def cmd_unwait(args) -> int:
+    """Stop this agent's own `wait`: the one process its marker names.
+
+    Agents used to do this by killing every process whose command line matched
+    *partner.py*wait* -- which also matched partner CLIs, whose launch prompt
+    said the same words, and took them down. The marker records the pid, so
+    nothing needs matching; and the pid is checked to still be a partner.py
+    wait before anything is killed, since pids are reused.
+    """
+    sd = state_dir()
+    roster = load_roster(sd)
+    who = me_id(roster)
+    mark = read_marker(sd, who)
+    pid = mark.get("pid")
+    if not pid:
+        emit(args, {"stopped": None}, f"no `wait` is in flight for {who}")
+        return 0
+    cmdline = process_cmdline(pid)
+    # A Python interpreter running partner.py with `wait` as its subcommand --
+    # not merely a command line that mentions both, which is what went wrong.
+    ours = bool(re.match(r'\s*"?[^"]*python[^"\s]*"?\s', cmdline, re.I)
+                and re.search(r'partner\.py"?\s+wait(\s|$)', cmdline, re.I))
+    if not ours:
+        unlink_quietly(sd / who / "waiting")     # the pid is gone or reused
+        emit(args, {"stopped": None},
+             f"the `wait` recorded for {who} (pid {pid}) is not running any more"
+             f" -- nothing killed")
+        return 0
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except OSError as exc:
+        emit(args, {"stopped": None, "error": str(exc)},
+             f"could not stop pid {pid}: {exc}")
+        return 1
+    if read_marker(sd, who).get("pid") == pid:
+        unlink_quietly(sd / who / "waiting")
+    emit(args, {"stopped": pid}, f"stopped {who}'s `wait` (pid {pid})")
     return 0
 
 

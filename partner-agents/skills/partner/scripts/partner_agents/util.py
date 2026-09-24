@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -108,3 +109,20 @@ def emit(args, data: dict, human: str) -> None:
     if getattr(args, "quiet", False):
         return
     print(json.dumps(data, indent=2) if getattr(args, "json", False) else human)
+
+
+def process_cmdline(pid: int) -> str:
+    """The command line of one process, or "" when it cannot be read."""
+    try:
+        if os.name == "nt":
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30)
+        else:
+            r = subprocess.run(["ps", "-o", "args=", "-p", str(int(pid))],
+                               capture_output=True, text=True, timeout=10)
+        return r.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return ""

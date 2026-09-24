@@ -19,12 +19,13 @@ import subprocess
 from pathlib import Path
 
 from .presence import is_listening, last_seen, turn_open
-from .state import read_pause, save_roster
+from .state import baton_of, read_pause, save_roster
 from .terminals.detect import (
     load_terminals, own_tab, terminal_available, terminal_bin, terminal_order,
 )
 from .terminals.tabs import term_argv
-from .timing import NUDGE_WINDOW, WAKE_REQUEST_TTL
+from .timing import NUDGE_WINDOW, UNANSWERED_NUDGES, WAKE_REQUEST_TTL
+from .transcript import append_msg
 from .util import NL, age_seconds, dig_json, nag_throttled
 from .waker import ensure_waker, request_wake, waker_alive
 
@@ -40,13 +41,17 @@ def silence_notice(sd: Path, roster: dict, who: str, wake: bool = False) -> str:
     if not silent:
         return ""
     if wake:
-        woke = [r["id"] for r in
-                (nudge_agent(sd, roster, p,
-                             "you stopped looping -- nobody is listening for you.")
-                 for p in silent) if r["nudged"]]
+        res = [nudge_agent(sd, roster, p,
+                           "you stopped looping -- nobody is listening for you.")
+               for p in silent]
+        woke = [r["id"] for r in res if r["nudged"]]
+        gone = [r["why"] for r in res if r.get("gone")]
+        out = "".join(f"{NL * 2}[{g}]" for g in gone)
         if woke:
-            return (f"{NL * 2}[{', '.join(woke)} had stopped listening; a wake-up "
+            out += (f"{NL * 2}[{', '.join(woke)} had stopped listening; a wake-up "
                     f"was typed into their tabs.]")
+        if out:
+            return out
     verb = "is" if len(silent) == 1 else "are"
     return (f"{NL * 2}[{', '.join(silent)} {verb} not listening -- no `wait` is "
             f"in flight. `nudge --id <id>` types a wake-up into the tab.]")
@@ -190,6 +195,41 @@ def nudge_text(pid: str, why: str) -> str:
             f"`{run} send`, then go back to `{run} wait` and keep looping.")
 
 
+def unanswered(sd: Path, pid: str) -> int:
+    """Wake-ups typed into this agent's tab that it has not acted on since.
+
+    Reset the moment it does anything -- any command stamps `lastseen` -- so
+    this only grows while nothing in that tab is reading what gets typed.
+    """
+    try:
+        st = json.loads((sd / pid / ".unanswered").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    return int(st.get("count", 0)) if st.get("seen") == last_seen(sd, pid) else 0
+
+
+def cli_gone(sd: Path, pid: str) -> bool:
+    """Has this agent ignored so many wake-ups that its CLI must have exited?"""
+    return unanswered(sd, pid) >= UNANSWERED_NUDGES
+
+
+def _count_nudge(sd: Path, pid: str) -> None:
+    try:
+        (sd / pid / ".unanswered").write_text(json.dumps(
+            {"count": unanswered(sd, pid) + 1, "seen": last_seen(sd, pid)}),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
+def restart_hint(sd: Path, pid: str) -> str:
+    run = ".partner\\p.cmd" if os.name == "nt" else ".partner/p.sh"
+    return (f"{pid} ignored {UNANSWERED_NUDGES} wake-ups typed into its tab, so "
+            f"its CLI has exited (killed, crashed or quit) and a shell is reading "
+            f"them. Wake-ups to it have stopped. Bring it back with `{run} "
+            f"restart --id {pid}`.")
+
+
 def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
                 throttle: int = NUDGE_WINDOW, relay: bool = True) -> dict:
     """Type a wake-up line into one agent's tab.
@@ -207,6 +247,13 @@ def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
         return {"id": pid, "nudged": False, "why": "unknown agent"}
     if entry.get("status") != "running":
         return {"id": pid, "nudged": False, "why": "not running"}
+    if relay and cli_gone(sd, pid):
+        # Typing more would only feed a shell. Say so once, to everyone, so
+        # whoever reads it can `restart` the agent instead of nudging again.
+        if not nag_throttled(sd / pid / ".gone-notice", 10 ** 9):
+            append_msg(sd, "system", "@all", restart_hint(sd, pid), baton_of(roster))
+        return {"id": pid, "nudged": False, "gone": True,
+                "why": restart_hint(sd, pid)}
     if throttle and nag_throttled(sd / pid / ".nudge", throttle):
         # Somebody already woke it inside the window: handled, not a failure.
         return {"id": pid, "nudged": False, "throttled": True,
@@ -221,10 +268,13 @@ def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
                        f"yourself, or restart it with: {manual}"}
     failure = _send(argv)
     if not failure:
+        if relay:
+            _count_nudge(sd, pid)
         return {"id": pid, "nudged": True, "why": why}
     if relay:
         request_wake(sd, pid, why)
         if waker_alive(sd):
+            _count_nudge(sd, pid)
             return {"id": pid, "nudged": True, "why": why, "via": "waker"}
         ensure_waker(sd)
         return {"id": pid, "nudged": False,

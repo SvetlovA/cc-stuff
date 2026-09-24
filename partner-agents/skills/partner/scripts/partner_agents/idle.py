@@ -35,7 +35,7 @@ from .transcript import append_msg, pending_for, tail_msgs
 from .util import (
     NL, age_seconds, nag_throttled, read_float, unlink_quietly, utcnow, write_float,
 )
-from .waking import nudge_agent, sleeps_through_pause, typable
+from .waking import cli_gone, nudge_agent, sleeps_through_pause, typable
 
 
 
@@ -63,6 +63,10 @@ def agent_busy(sd: Path, roster: dict, pid: str) -> str:
     """Why this agent has not finished its work -- or "" when it has."""
     if turn_open(sd, pid):
         return "mid-turn"
+    if cli_gone(sd, pid):
+        # Its CLI exited: it costs nothing and does nothing, so it must not keep
+        # everyone else looping. The resume wake-up reports it again.
+        return ""
     if not is_listening(sd, roster, pid):
         return "not in `wait` -- still working"
     owed = pending_for(sd, roster, pid)

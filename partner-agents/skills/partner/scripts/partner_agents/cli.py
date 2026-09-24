@@ -9,10 +9,11 @@ from .commands.discovery import (
 from .commands.hooks import cmd_hook_prompt, cmd_hook_stop
 from .commands.messaging import (
     cmd_baton, cmd_claim, cmd_kickoff, cmd_nudge, cmd_pending, cmd_read, cmd_send,
-    cmd_wait,
+    cmd_unwait, cmd_wait,
 )
 from .commands.session import (
-    cmd_archive, cmd_init, cmd_resume, cmd_sessions, cmd_snapshot, cmd_spawn, cmd_stop,
+    cmd_archive, cmd_init, cmd_restart, cmd_resume, cmd_sessions, cmd_snapshot,
+    cmd_spawn, cmd_stop,
 )
 from .commands.status import cmd_idle, cmd_list, cmd_state
 from .commands.waker import cmd_waker
@@ -105,6 +106,12 @@ def main() -> int:
     rs.add_argument("--terminal", default=None, help="see `terminals`")
     rs.set_defaults(fn=cmd_resume)
 
+    rst = sub.add_parser("restart", help="relaunch one agent whose CLI has exited")
+    rst.add_argument("--id", required=True)
+    rst.add_argument("--no-tab", action="store_true")
+    rst.add_argument("--terminal", default=None, help="see `terminals`")
+    rst.set_defaults(fn=cmd_restart)
+
     ck = sub.add_parser("check", help="validate a config without starting anything")
     ck.add_argument("--provider", required=True)
     ck.add_argument("--model", default=None)
@@ -148,6 +155,9 @@ def main() -> int:
     ng.add_argument("--all", action="store_true", help="every agent but you")
     ng.add_argument("--text", default=None, help="why they are being woken")
     ng.set_defaults(fn=cmd_nudge)
+
+    sub.add_parser("unwait", help="stop your own `wait` -- never kill by pattern"
+                   ).set_defaults(fn=cmd_unwait)
 
     idl = sub.add_parser("idle", help="whether every agent has finished, and "
                                       "when the loops pause")

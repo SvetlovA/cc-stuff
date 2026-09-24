@@ -235,6 +235,48 @@ def cmd_sessions(args) -> int:
     return 0
 
 
+def cmd_restart(args) -> int:
+    """Relaunch one tab agent whose CLI has exited, in a new tab.
+
+    Wake-ups stop once an agent ignores enough of them (`cli_gone`); this is
+    what brings it back. Same launch path as `resume`, for one agent: re-briefed
+    from the transcript, owing nothing for what was said while it was gone.
+    """
+    root = repo_root()
+    sd = state_dir(root)
+    roster = load_roster(sd)
+    pid, me = args.id, me_id(roster)
+    entry = roster["partners"].get(pid)
+    if not entry:
+        emit(args, {"error": "unknown"}, f"no agent {pid} in the roster")
+        return 1
+    if (entry.get("kind") or "tab") == "session":
+        emit(args, {"error": "session"},
+             f"{pid} is the session the skill was started from -- it has no "
+             f"launcher here; the human restarts it and runs `resume`")
+        return 1
+    # Everything that described the dead process: its wait, its streaks, and
+    # the count of wake-ups it never read.
+    for name in ("waiting", "turn", "idle_since", "lastwait", "lastseen",
+                 ".unanswered", ".gone-notice", ".nudge", "wake.json"):
+        unlink_quietly(sd / pid / name)
+    end = (sd / "chat.md").stat().st_size if (sd / "chat.md").exists() else 0
+    label, _ = relaunch(sd, pid, roster, root, SCRIPT, args.no_tab,
+                        getattr(args, "terminal", None))
+    (sd / pid / "cursor").write_text(str(end), encoding="utf-8")
+    set_floor(sd, pid)
+    save_roster(sd, roster)
+    append_msg(sd, "system", "@all",
+               f"**{pid} restarted** by {me}{' in ' + label if label else ''}: its "
+               f"CLI had exited. It has been re-briefed from the transcript.",
+               baton_of(roster))
+    ensure_waker(sd)
+    emit(args, {"restarted": pid, "tab": label},
+         f"restarted {pid}{' -> ' + label if label else ''}. Its old tab is left "
+         f"open; close it once the new one is running.")
+    return 0
+
+
 def cmd_resume(args) -> int:
     """Bring a session back, or restart the agents of the current one.
 

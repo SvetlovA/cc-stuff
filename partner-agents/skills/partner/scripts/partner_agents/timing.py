@@ -66,3 +66,9 @@ WAKER_STALE = 10           # a waker heartbeat older than this is a dead waker
 WAKER_RELAUNCH = 60        # at most one attempt per this many seconds to start one
 WAKE_REQUEST_TTL = 120     # an older request describes a moment that has passed
 WAKER_IDLE_EXIT = 6 * 3600 # nobody has done anything for this long: the waker exits
+
+# Wake-ups typed into a tab whose agent never acts on them are going to a CLI
+# that has exited -- killed, crashed, or quit -- and a shell is reading them.
+# After this many in a row the tab is left alone and everyone is told to
+# `restart` the agent instead.
+UNANSWERED_NUDGES = 3

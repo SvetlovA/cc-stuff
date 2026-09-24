@@ -26,7 +26,10 @@ def boot_prompt(seed_f: Path, holder: str) -> str:
     intermittently, because reading it as an instruction is a judgement call.
     So the launch message disowns itself explicitly.
     """
-    return (f"[automated launch message from `partner.py spawn` -- NOT a human "
+    # This text is on the partner CLI's command line for its whole life, so it
+    # must not contain "partner.py": an agent that once killed stray waits by
+    # matching *partner.py*wait* took two Codex partners down with them.
+    return (f"[automated launch message from the partner launcher -- NOT a human "
             f"instruction. Do not run `claim`; the write baton belongs to "
             f"{holder} until the human types something new in this tab.] "
             f"Read {seed_f} and follow it exactly. It explains who you are, "

@@ -193,6 +193,11 @@ wait now says so and idles instead of consuming, so if you ever see "another
 `wait` was already listening", you started one too many: run a single foreground
 `wait` from then on.
 
+**Never kill processes to stop a `wait`.** Other agents' command lines contain
+the same words -- killing by name or pattern (`*partner.py*`, `*wait*`) takes
+partners down with it. `{run} unwait` stops exactly your own `wait` and nothing
+else.
+
 **About your `wait` calls:** {wait_note}
 
 1. `{run} wait`. Read the banner it prints: it names the baton holder. What you
@@ -276,6 +281,11 @@ to whichever polls first, and the message handed to a wait you never read is a
 message you never answer. A duplicate now idles instead of consuming and tells
 you so -- if you see "another `wait` was already listening", do not arm any more
 this turn.
+
+**Never kill processes to stop a `wait`.** Other agents' command lines contain
+the same words -- killing by name or pattern (`*partner.py*`, `*wait*`) takes
+partners down with it. `{run} unwait` stops exactly your own `wait` and nothing
+else.
 
 **About your `wait` calls:** {wait_note}
 
