@@ -71,20 +71,27 @@ def is_listening(sd: Path, roster: dict, who: str) -> bool:
     """
     # A heartbeat, not the file's existence: a wait that was killed leaves the
     # marker behind, and treating that as "listening" would let an agent go
-    # deaf silently.
-    if marker_live(read_marker(sd, who)):
-        return True
-    # The session agent backgrounds its `wait`, so a Stop firing immediately
-    # after can beat the new process to writing its marker. That race lasts as
-    # long as an interpreter takes to start -- so the grace is seconds, not the
-    # liveness window. At 360s it swallowed the real case: a session agent that
-    # ran any command five minutes ago and never armed a wait looked like it was
-    # listening, and nothing told it otherwise.
-    entry = roster["partners"].get(who) or {}
-    if (entry.get("kind") or "tab") == "session":
-        age = age_seconds(last_seen(sd, who))
-        return age is not None and age <= MARKER_STALE
-    return False
+    # deaf silently. No grace on `lastseen` either -- every `send` refreshes it,
+    # so a session agent that replied and stopped without arming a wait looked
+    # like one whose wait was still starting. The Stop hook covers that race
+    # with `listening_soon` instead.
+    return marker_live(read_marker(sd, who))
+
+
+def listening_soon(sd: Path, roster: dict, who: str, grace: float) -> bool:
+    """Is a `wait` in flight, or about to prove it is within `grace` seconds?
+
+    A background `wait` armed just before a Stop has not started its
+    interpreter yet, so its marker does not exist. Looking again for a few
+    seconds tells that apart from an agent that armed nothing.
+    """
+    end = time.time() + grace
+    while True:
+        if is_listening(sd, roster, who):
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(0.25)
 
 
 def turn_open(sd: Path, pid: str) -> bool:

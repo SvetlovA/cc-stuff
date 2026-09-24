@@ -15,6 +15,7 @@ from .commands.session import (
     cmd_archive, cmd_init, cmd_resume, cmd_sessions, cmd_snapshot, cmd_spawn, cmd_stop,
 )
 from .commands.status import cmd_idle, cmd_list, cmd_state
+from .commands.waker import cmd_waker
 from .providers.recipes import AUTO_LEVELS
 from .timing import IDLE_PAUSE, LIVE_WINDOW, WAIT_POLL, WAIT_TIMEOUT
 
@@ -192,6 +193,8 @@ def main() -> int:
                    ).set_defaults(fn=cmd_hook_stop)
     sub.add_parser("hook-prompt", help="internal: UserPromptSubmit hook"
                    ).set_defaults(fn=cmd_hook_prompt)
+    sub.add_parser("waker", help="internal: types wake-ups for agents that cannot"
+                   ).set_defaults(fn=cmd_waker)
 
     args = ap.parse_args()
     try:

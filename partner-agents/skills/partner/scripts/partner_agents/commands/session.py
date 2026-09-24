@@ -20,6 +20,7 @@ from ..state import (
 )
 from ..terminals.tabs import open_tab, write_runner
 from ..transcript import append_msg, set_floor, tail_msgs
+from ..waker import ensure_waker
 from ..waking import adopt_own_tab
 from ..util import NL, emit, unlink_quietly, utcnow, write_float
 
@@ -63,6 +64,7 @@ def cmd_init(args) -> int:
         roster["baton"] = me
     save_roster(sd, roster)
     adopt_own_tab(sd, roster, me)        # so a pause can stop it like the rest
+    ensure_waker(sd)
 
     write_wrappers(sd, SCRIPT)            # shared, for humans
     write_wrappers(sd, SCRIPT, me)        # this agent's own
@@ -148,6 +150,7 @@ def cmd_spawn(args) -> int:
     entry["tab_title"] = tab.get("title", f"partner:{pid}")
     entry["runner"] = str(runner)
     save_roster(sd, roster)
+    ensure_waker(sd)             # spawn just drove the terminal, so it can type
     # A new voice is work for everyone already here. The newcomer itself is
     # skipped by the wake-up: it is still booting.
     mark_active(sd, roster, me_id(roster), f"spawned {pid}")
@@ -311,6 +314,7 @@ def cmd_resume(args) -> int:
     save_roster(sd, roster)
     if me:
         adopt_own_tab(sd, roster, me)
+    ensure_waker(sd)
     what = f"session {args.session}" if args.session else "the current session"
     append_msg(sd, "system", "@all",
                f"{what.capitalize()} resumed by **{me or me_id(roster)}**. "

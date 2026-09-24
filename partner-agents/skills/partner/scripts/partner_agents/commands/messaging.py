@@ -21,6 +21,7 @@ from ..transcript import (
     read_new, render, tail_msgs,
 )
 from ..util import NL, age_seconds, emit, nag_throttled
+from ..waker import ensure_waker
 from ..waking import (
     adopt_own_tab, nudge_agent, silence_notice, silent_agents, sleeps_through_pause,
 )
@@ -41,6 +42,7 @@ def cmd_wait(args) -> int:
     # Whoever runs this is in its own tab right now; recording it is what lets a
     # pause stop this agent and a message type it awake again, like any other.
     adopt_own_tab(sd, roster, who)
+    ensure_waker(sd)             # typing wake-ups for agents that cannot
     # Only an agent that cannot be typed awake keeps a wait through a pause --
     # see sleeps_through_pause. Everyone else stops, whoever started the session.
     sleeper = sleeps_through_pause(roster, who)

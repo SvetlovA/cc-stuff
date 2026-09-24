@@ -19,6 +19,8 @@ State lives in <repo>/.partner/:
     <id>/handoff.md    what was decided before it joined
     <id>/cursor        byte offset of the last message it consumed
     <id>/run.cmd|.sh   the command its terminal tab runs
+    <id>/wake.json     a wake-up its requester could not type itself
+    waker.json         heartbeat of the process that types those
 
 Every subcommand prints either plain text or JSON (--json) so an agent can
 parse it without screen-scraping. `partner_agents/cli.py` lists them all.

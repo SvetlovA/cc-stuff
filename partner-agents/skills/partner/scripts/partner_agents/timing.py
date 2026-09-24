@@ -54,3 +54,15 @@ REARM_GAP = 60
 # A turn marker older than this is from a turn that never reached Stop -- an
 # interrupt -- and stops counting as work in progress.
 TURN_STALE = 1800
+
+# A background `wait` needs an interpreter start before it writes its marker. A
+# Stop firing right after one was armed looks for that marker this long before
+# calling the agent deaf -- rather than trusting a recent `lastseen`, which any
+# `send` refreshes and which is how a deaf session agent used to slip through.
+ARM_GRACE = 5
+
+WAKER_POLL = 1.0           # how often the waker looks for wake-up requests
+WAKER_STALE = 10           # a waker heartbeat older than this is a dead waker
+WAKER_RELAUNCH = 60        # at most one attempt per this many seconds to start one
+WAKE_REQUEST_TTL = 120     # an older request describes a moment that has passed
+WAKER_IDLE_EXIT = 6 * 3600 # nobody has done anything for this long: the waker exits

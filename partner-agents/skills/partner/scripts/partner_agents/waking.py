@@ -24,8 +24,9 @@ from .terminals.detect import (
     load_terminals, own_tab, terminal_available, terminal_bin, terminal_order,
 )
 from .terminals.tabs import term_argv
-from .timing import NUDGE_WINDOW
+from .timing import NUDGE_WINDOW, WAKE_REQUEST_TTL
 from .util import NL, age_seconds, dig_json, nag_throttled
+from .waker import ensure_waker, request_wake, waker_alive
 
 
 def silence_notice(sd: Path, roster: dict, who: str, wake: bool = False) -> str:
@@ -190,12 +191,16 @@ def nudge_text(pid: str, why: str) -> str:
 
 
 def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
-                throttle: int = NUDGE_WINDOW) -> dict:
+                throttle: int = NUDGE_WINDOW, relay: bool = True) -> dict:
     """Type a wake-up line into one agent's tab.
 
     Throttled through a marker in the target's own directory rather than the
     caller's, so three agents noticing the same silent partner in the same
     minute produce one nudge between them, not three.
+
+    When this process cannot run the terminal's CLI -- a sandboxed agent -- the
+    wake-up is handed to the session's waker instead (`relay`); the waker
+    itself passes relay=False so a failure there is reported, not re-queued.
     """
     entry = (roster.get("partners") or {}).get(pid) or {}
     if not entry:
@@ -214,15 +219,39 @@ def nudge_agent(sd: Path, roster: dict, pid: str, why: str,
                 "why": f"{where} cannot be typed into from outside (`terminals` "
                        f"says which can) -- type \"continue\" in {pid}'s tab "
                        f"yourself, or restart it with: {manual}"}
+    failure = _send(argv)
+    if not failure:
+        return {"id": pid, "nudged": True, "why": why}
+    if relay:
+        request_wake(sd, pid, why)
+        if waker_alive(sd):
+            return {"id": pid, "nudged": True, "why": why, "via": "waker"}
+        ensure_waker(sd)
+        return {"id": pid, "nudged": False,
+                "why": f"{failure} -- this agent cannot drive the terminal (a "
+                       f"sandbox?), and no waker is running to do it instead; "
+                       f"the request waits {WAKE_REQUEST_TTL}s for one"}
+    return {"id": pid, "nudged": False, "why": failure}
+
+
+def _send(argv: list[str]) -> str:
+    """Run a send command; "" on success, otherwise what went wrong."""
     try:
         r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"id": pid, "nudged": False, "why": f"{type(exc).__name__}"}
+        return type(exc).__name__
+    try:
+        # Orca reports a refused call as ok:false in its JSON, not only an exit code.
+        doc = json.loads(r.stdout)
+        if isinstance(doc, dict) and doc.get("ok") is False:
+            err = doc.get("error") or {}
+            return str(err.get("message") or err.get("code") or "send refused")[:200]
+    except ValueError:
+        pass
     if r.returncode != 0:
-        return {"id": pid, "nudged": False,
-                "why": (r.stderr or r.stdout or "").strip()[:200] or "send failed"}
-    return {"id": pid, "nudged": True, "why": why}
+        return (r.stderr or r.stdout or "").strip()[:200] or "send failed"
+    return ""
 
 
 def silent_agents(sd: Path, roster: dict, who: str,

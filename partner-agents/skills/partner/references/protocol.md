@@ -230,7 +230,7 @@ So ownership is explicit:
 
 `read` prints which state the caller is in — *a wait is already in flight for you*, or *no wait is in flight for you* — because "have I already armed one?" was previously unanswerable except by guessing, and guessing wrong is what produced a second one.
 
-The session agent keeps a short grace on top: it backgrounds its `wait`, so a Stop firing immediately afterwards can beat the new process to writing its marker. That grace is `MARKER_STALE` (15s) — long enough for an interpreter to start, short enough that a session agent which ran a command minutes ago and never armed a wait is correctly reported as deaf. It used to be the 360s liveness window, which swallowed exactly that case.
+The session agent backgrounds its `wait`, so a Stop firing immediately afterwards can beat the new process to writing its marker. The Stop hook covers that race by looking for the marker for up to `ARM_GRACE` (5s) before it calls the agent deaf (`listening_soon`). It used to accept any `lastseen` under 15s instead. That was wrong because every `send` refreshes `lastseen`: a session agent that replied and ended its turn with no `wait` armed passed as listening, and a partner looped for twenty minutes waiting on it.
 
 ### Waking an agent that stopped listening
 
@@ -250,6 +250,15 @@ Where it fires:
 - **`read` and `wait`** name silent agents in their output, so an agent about to conclude that a partner has nothing to say learns that nobody was listening instead.
 
 Nudges are throttled through a marker in the *target's* directory (`<id>/.nudge`, 120s), so three agents noticing the same silence produce one wake-up between them. The text says it is automated and not the human, and tells the agent not to claim the baton — see "How the baton moves".
+
+**The waker types for agents that cannot.** Typing means running the terminal's own CLI, and a sandboxed agent may not be allowed to. Codex under `-s workspace-write` cannot even read Orca's runtime file, so every `orca terminal send` it runs fails. When a nudge fails, `nudge_agent` writes `<id>/wake.json` for the target, and the session's waker performs it within a second. The waker is one detached `partner.py waker` process per session:
+
+- `ensure_waker` starts it from `init`, `spawn`, `resume` and every `wait`, whenever `waker.json` has no fresh heartbeat. Launches are throttled to one per `WAKER_RELAUNCH` (60s).
+- Before it takes the job it lists tabs with the terminal's own CLI (`can_drive`). A waker started from inside a sandbox fails there and exits, leaving the job to one started by an agent that can drive the terminal.
+- It skips a request older than `WAKE_REQUEST_TTL` (120s) or for an agent that is listening again, and sends the rest unthrottled, since the requester already applied the throttle.
+- It exits once no agent is running, or after `WAKER_IDLE_EXIT` (6h) with no activity.
+
+Without a live waker, a failed nudge says so: `nudged: false`, with the reason and a note that the request is waiting for a waker. That applies to the resume wake-up too, so a pause lifted from a sandboxed tab still wakes everyone.
 
 The briefing tells each agent to loop — `wait`, think, `send`, repeat — and what it does on each pass turns on whether it holds the baton. The holder runs the debate and makes the change (state a position, `send --to @all --wait`, weigh the replies, act). Everyone else advises — and not only in reply to the holder: any non-holder can open a thread with any other, `send --to p3` as readily as `--to @all`, so three or four agents can work a question out among themselves and hand the holder a joint recommendation. The baton moves with the human's attention; each `wait` and `read` reprints the holder, and an agent switches roles the moment it changes.
 

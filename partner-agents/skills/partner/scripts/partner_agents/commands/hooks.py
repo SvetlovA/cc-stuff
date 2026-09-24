@@ -13,7 +13,8 @@ import time
 from pathlib import Path
 
 from ..idle import break_idle, mark_active
-from ..presence import is_listening
+from ..presence import listening_soon
+from ..timing import ARM_GRACE
 from ..state import baton_of, load_roster, me_id, read_pause, state_dir
 from ..transcript import pending_for, render
 from ..util import NL, nag_throttled, unlink_quietly, write_float
@@ -138,7 +139,7 @@ def stop_block_reason(sd: Path, roster: dict, who: str, entry: dict) -> str:
     # the next thing said to it lands in a transcript nobody is reading. Every
     # agent goes back to `wait` at the end of every turn, and this is what
     # enforces it.
-    if is_listening(sd, roster, who):
+    if listening_soon(sd, roster, who, ARM_GRACE):
         return ""
     if read_pause(sd) and not sleeps_through_pause(roster, who):
         # Paused: leaving the loop is the point, for this session exactly as
