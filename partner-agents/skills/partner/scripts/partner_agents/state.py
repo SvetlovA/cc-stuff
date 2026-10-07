@@ -54,6 +54,30 @@ def me_id(roster: dict) -> str:
     return os.environ.get("PARTNER_ID") or roster.get("self") or "p1"
 
 
+def claude_session() -> str:
+    """The Claude Code session this process runs under, "" outside one.
+
+    The same id Claude Code hands its hooks as `session_id`.
+    """
+    return os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+
+
+def is_bound_session(entry: dict, sid: str | None = None) -> bool:
+    """Is this process the session agent `entry` names?
+
+    The session agent has no wrapper of its own, so `me_id` falls back to
+    roster["self"] for *every* process in the repo without PARTNER_ID -- and
+    the plugin's hooks fire in every Claude Code session opened there. Without
+    this check, an unrelated session typing a prompt counted as the human
+    writing to the session agent: it lifted the pause, was then told by the
+    Stop hook to run `wait`, and that `wait` recorded the unrelated tab as the
+    session agent's -- so later wake-ups were typed into it. `init` and
+    `resume` record which session owns the entry; nothing else may act as it.
+    """
+    sid = claude_session() if sid is None else sid
+    return (entry.get("cc_session") or "") == sid
+
+
 def baton_of(roster: dict) -> str:
     """Who may write. Falls back to you if the stored value names no one.
 

@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 
 from .presence import is_listening, last_seen, turn_open
-from .state import baton_of, read_pause, save_roster
+from .state import baton_of, is_bound_session, read_pause, save_roster
 from .terminals.detect import (
     load_terminals, own_tab, terminal_available, terminal_bin, terminal_order,
 )
@@ -104,6 +104,14 @@ def adopt_own_tab(sd: Path, roster: dict, who: str) -> None:
     entry = (roster.get("partners") or {}).get(who)
     tab = own_tab()
     if not entry or not tab:
+        return
+    # Only the agent itself may say where it is. `wait --who`, or a Claude
+    # session that merely shares the repo, would otherwise record its own tab
+    # here, and every wake-up for this agent would be typed into it.
+    if (entry.get("kind") or "tab") == "session":
+        if not is_bound_session(entry):
+            return
+    elif os.environ.get("PARTNER_ID") != who:
         return
     if (entry.get("tab_kind"), entry.get("tab_handle")) == (tab["kind"], tab["handle"]):
         return

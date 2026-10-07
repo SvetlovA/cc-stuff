@@ -15,8 +15,8 @@ from ..sessions import (
     archive_current, read_sessions, relaunch, session_label, sessions_dir,
 )
 from ..state import (
-    SCRIPT, baton_of, git_exclude, load_roster, me_id, repo_root, repo_snapshot,
-    save_roster, state_dir, write_wrappers,
+    SCRIPT, baton_of, claude_session, git_exclude, load_roster, me_id, repo_root,
+    repo_snapshot, save_roster, state_dir, write_wrappers,
 )
 from ..terminals.tabs import open_tab, write_runner
 from ..transcript import append_msg, set_floor, tail_msgs
@@ -60,6 +60,9 @@ def cmd_init(args) -> int:
             "tab": "this session",
         }
     roster["self"] = me
+    # Whoever runs `init` is the session agent from now on -- also the way to
+    # re-take a session whose Claude Code session id changed.
+    roster["partners"][me]["cc_session"] = claude_session()
     if roster.get("baton") not in roster["partners"]:
         roster["baton"] = me
     save_roster(sd, roster)
@@ -320,6 +323,7 @@ def cmd_resume(args) -> int:
         roster["partners"][me]["kind"] = "session"
         roster["partners"][me]["status"] = "running"
         roster["partners"][me]["tab"] = "this session"
+        roster["partners"][me]["cc_session"] = claude_session()
         # The tab it had belongs to the old run; the one it is in now is known.
         roster["partners"][me].pop("tab_kind", None)
         roster["partners"][me].pop("tab_handle", None)

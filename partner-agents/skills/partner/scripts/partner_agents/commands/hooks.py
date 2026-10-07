@@ -15,7 +15,9 @@ from pathlib import Path
 from ..idle import break_idle, mark_active
 from ..presence import listening_soon
 from ..timing import ARM_GRACE
-from ..state import baton_of, load_roster, me_id, read_pause, state_dir
+from ..state import (
+    baton_of, is_bound_session, load_roster, me_id, read_pause, state_dir,
+)
 from ..transcript import pending_for, render
 from ..util import NL, nag_throttled, unlink_quietly, write_float
 from ..waking import sleeps_through_pause
@@ -99,6 +101,10 @@ def _hook_context(payload: dict):
     who = me_id(roster)
     entry = roster["partners"].get(who)
     if not entry or entry.get("status") != "running":
+        return None
+    if (entry.get("kind") or "tab") == "session" and not is_bound_session(
+            entry, str(payload.get("session_id") or "") or None):
+        # Some other Claude Code session in the same repo -- see is_bound_session.
         return None
     return sd, roster, who, entry
 
