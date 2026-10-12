@@ -210,25 +210,21 @@ Run shell commands. That is how it calls `wait` and `send`. A CLI that cannot ru
 
 ## Command-runtime caps
 
-Every agent CLI limits how long one shell command may run, and `wait` is a long-running command by design — so the cap decides whether an agent can stay in the loop at all. A wait longer than the cap is killed mid-poll and returns nothing, which reads as a broken command; the agent then ends its turn and, unless its CLI happens to have a Stop hook, is never re-invoked.
+Long-running waits need the host's shell execution protocol. A yielded Codex process stays alive and must be polled; a process that actually timed out may need restarting. Read [host integration](hosts.md) and the active tool documentation before deciding which occurred.
 
-**The rule is stated to every agent, whatever it is running**, because it holds for every CLI and no partner should depend on this file having heard of it:
-
-> If `wait` comes back early — especially with no output at all — that is your shell tool's cap, not a failure and not an answer. Raise the timeout you pass that tool if it takes one, and either way run `wait` again immediately.
-
-A **specific** cap is only an accelerator on top of that, and it lives with the rest of that CLI's launch facts rather than in a table of its own — `wait_note` in a recipe, or in the user's own `providers.json`. `resolve_provider` returns it like `install` or `efforts`, and `wait_note()` falls back to the generic rule whenever a CLI has none, including every probed and `--cmd` CLI.
+Keep one wait per participant. After a completed empty timeout, listen again. After a tool yield, continue that existing process. The provider's `wait_note` carries the relevant instructions; custom providers can supply their own note.
 
 | Where the CLI comes from | Where its note comes from |
 |--------------------------|---------------------------|
-| a built-in recipe | the recipe's `wait_note` (two are measured: a 120s Bash-tool cap, and a 10s exec-tool cap) |
+| a built-in recipe | the recipe's `wait_note` (Claude background tasks or Codex yielded-process polling) |
 | `~/.claude/partner-providers.json` or `.partner/providers.json` | that entry's `wait_note` — how a cap this plugin has never seen still reaches the briefing |
 | a probed CLI, or `--provider custom --cmd` | the generic rule |
 
-Measuring a cap is not something `--help` can answer, which is why this is guidance rather than discovery: the agent finds its own limit the first time a wait returns early, and the note only saves it that round.
+Read the active execution tool documentation for yield and timeout behavior. Use a custom `wait_note` when a provider requires different handling.
 
 `wait`'s own default is 90s for the same reason: at 120s it sat exactly on one known cap, turning every normal wait into a tool error.
 
-A cap is only half the problem — the other half is that nothing re-invokes a tab agent that ends its turn. Inside Claude Code the `Stop` hook catches that; elsewhere the recovery is a nudge typed into the tab (`references/terminals.md`). Codex 0.153 does implement a Claude-Code-shaped hooks system of its own, including a `Stop` event, but its hooks require a persisted trust hash or `--dangerously-bypass-hook-trust`, so wiring one from here would risk a trust prompt blocking the very startup it is meant to protect. Worth revisiting once that surface is documented.
+A stopped turn can also leave an agent unreachable. Claude Code and Codex can load the shared `Stop` hook; Codex requires the installed hook definition to be trusted. Follow [host integration](hosts.md). When hooks are unavailable, maintain the wait loop explicitly and recover with a nudge typed into the tab. A Codex tool yield is not a killed wait: poll its existing tool session before starting another.
 
 ## Adding a recipe
 

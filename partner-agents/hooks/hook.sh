@@ -21,7 +21,7 @@ for c in python python3 py; do
 done
 [ -n "$py" ] || exit 0
 
-root=${CLAUDE_PLUGIN_ROOT:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
+root=${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}}
 script="$root/skills/partner/scripts/partner.py"
 [ -f "$script" ] || exit 0
 

@@ -15,8 +15,8 @@ from ..sessions import (
     archive_current, read_sessions, relaunch, session_label, sessions_dir,
 )
 from ..state import (
-    SCRIPT, baton_of, claude_session, git_exclude, load_roster, me_id, repo_root,
-    repo_snapshot, save_roster, state_dir, write_wrappers,
+    SCRIPT, baton_of, bind_session, git_exclude, load_roster, me_id, repo_root,
+    repo_snapshot, save_roster, session_host, state_dir, write_wrappers,
 )
 from ..terminals.tabs import open_tab, write_runner
 from ..transcript import append_msg, set_floor, tail_msgs
@@ -51,7 +51,7 @@ def cmd_init(args) -> int:
         # it -- so it carries the same fields and gets the same briefing.
         roster["partners"][me] = {
             "id": me,
-            "provider": getattr(args, "me_provider", None) or "claude",
+            "provider": getattr(args, "me_provider", None) or session_host() or "claude",
             "model": getattr(args, "me_model", None),
             "effort": getattr(args, "me_effort", None),
             "auto": getattr(args, "me_auto", None) or "edits",
@@ -61,8 +61,12 @@ def cmd_init(args) -> int:
         }
     roster["self"] = me
     # Whoever runs `init` is the session agent from now on -- also the way to
-    # re-take a session whose Claude Code session id changed.
-    roster["partners"][me]["cc_session"] = claude_session()
+    # re-take a session whose host session id changed.
+    caller = getattr(args, "me_provider", None) or session_host()
+    changed_host = bool(caller and caller != roster["partners"][me]["provider"])
+    if caller:
+        roster["partners"][me]["provider"] = caller
+    bind_session(roster["partners"][me], caller)
     if roster.get("baton") not in roster["partners"]:
         roster["baton"] = me
     save_roster(sd, roster)
@@ -71,9 +75,10 @@ def cmd_init(args) -> int:
 
     write_wrappers(sd, SCRIPT)            # shared, for humans
     write_wrappers(sd, SCRIPT, me)        # this agent's own
-    if fresh:
+    if fresh or changed_host:
         write_briefing(sd, me, roster, root, SCRIPT,
                        getattr(args, "context", None), kind="session")
+    if fresh:
         set_floor(sd, me)          # owes nothing for what was said before it
     git_exclude(root)
     emit(args, {"state_dir": str(sd), "repo_root": str(root), "self": me},
@@ -95,11 +100,16 @@ def cmd_spawn(args) -> int:
     # Register the caller as part of spawning, so "a partner is running" is one
     # command rather than two. Splitting them left sessions that registered
     # themselves, stopped, and never created anybody.
-    cmd_init(argparse.Namespace(
-        json=False, quiet=True,
-        me_provider=args.me_provider, me_model=args.me_model,
-        me_effort=args.me_effort, me_auto=args.me_auto, me_name=None,
-        context=None))
+    existing = load_roster(sd)
+    tab_caller = existing['partners'].get(os.environ.get('PARTNER_ID', ''))
+    if not tab_caller or tab_caller.get('kind') != 'tab':
+        cmd_init(argparse.Namespace(
+            json=False, quiet=True,
+            me_provider=args.me_provider, me_model=args.me_model,
+            me_effort=args.me_effort, me_auto=args.me_auto, me_name=None,
+            context=None))
+    # A registered tab participant can add peers without rebinding the starting
+    # session to its own host/thread (e.g. a Codex peer in a Claude-led session).
 
     roster = load_roster(sd)
     pid = args.name or f"p{len(roster['partners']) + 1}"
@@ -323,7 +333,10 @@ def cmd_resume(args) -> int:
         roster["partners"][me]["kind"] = "session"
         roster["partners"][me]["status"] = "running"
         roster["partners"][me]["tab"] = "this session"
-        roster["partners"][me]["cc_session"] = claude_session()
+        caller = session_host()
+        if caller:
+            roster["partners"][me]["provider"] = caller
+        bind_session(roster["partners"][me], caller)
         # The tab it had belongs to the old run; the one it is in now is known.
         roster["partners"][me].pop("tab_kind", None)
         roster["partners"][me].pop("tab_handle", None)

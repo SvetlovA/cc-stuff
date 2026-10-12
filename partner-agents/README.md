@@ -2,7 +2,7 @@
 
 Run several AI agents as equal partners on one repo, each in its own terminal tab, and argue with them before you commit to anything.
 
-A partner is a **separate process** with its own provider, model, and context — not a subagent. Claude can run the debate against whichever agent CLIs are on your machine, or any CLI you can describe in one line, and the disagreement is the product: two models that differ surface the assumptions one model alone glides past.
+A partner is a **separate process** with its own provider, model, and context — not a subagent. Claude Code or Codex can run the debate against whichever agent CLIs are on your machine, or any CLI you can describe in one line, and the disagreement is the product: two models that differ surface the assumptions one model alone glides past.
 
 ## What it does
 
@@ -32,18 +32,40 @@ A partner is a **separate process** with its own provider, model, and context �
 
 ## Install
 
-```bash
-cc plugin install https://github.com/SvetlovA/cc-stuff/tree/master/partner-agents
+### Claude Code
+
+```text
+/plugin install partner-agents --marketplace SvetlovA/cc-stuff
 ```
 
-Or locally:
+Or from the shell:
+
+```bash
+claude plugin marketplace add SvetlovA/cc-stuff
+claude plugin install partner-agents@SvetlovA-cc-stuff
+```
+
+### Codex
+
+```bash
+codex plugin marketplace add SvetlovA/cc-stuff
+codex plugin add partner-agents@SvetlovA-cc-stuff
+```
+
+The `.codex-plugin/plugin.json` loads the shared skill and hooks. Review and trust those hooks in Codex before using them; see [the official hook documentation](https://learn.chatgpt.com/docs/hooks). The plugin requires local shell and terminal access. Copying only the skill folder omits the hook configuration, so install the whole plugin for the full workflow.
+
+### Local development
 
 ```bash
 git clone https://github.com/SvetlovA/cc-stuff.git
-cc --plugin-dir ./cc-stuff/partner-agents
+claude --plugin-dir ./cc-stuff/partner-agents
 ```
 
+For Codex, run `codex plugin marketplace add ./cc-stuff`, then the `codex plugin add` command above. Restart the session after plugin changes.
+
 ## Use
+
+Invoke `/partner-agents:partner` in Claude Code or `$partner` in Codex. In the examples below, `/partner` is shorthand for the host's invocation.
 
 ```
 /partner                              # new session: archive the current one, spawn one partner
@@ -204,7 +226,7 @@ Two severities, and the split is the point. A **problem** is something no amount
 
 Each tab runs the provider's ordinary interactive interface, started on a briefing that tells it to loop: block on `wait` until somebody addresses it, think, reply, repeat. Nothing runs headlessly and nothing supervises the agents, so there are no session ids to track and no output formats to parse — which is why any CLI that can run shell commands can join with a one-line template.
 
-`p1` — the session the skill was invoked in — can't block in the foreground without cutting off the human who talks to it through that same session. It runs the identical loop with `wait` as a background command instead, re-armed at the end of every turn, so it stays in the debate even while the human is working in a partner's tab.
+`p1` — the session the skill was invoked in — can't block in the foreground without cutting off the human who talks to it through that same session. Claude Code runs one background `wait` and receives a task notification; Codex polls one yielded shell process while the turn stays active. Both follow the same debate loop while the human works in a partner's tab.
 
 Once every agent has finished its work and a minute passes with nothing new, the loops stop. Every agent ends its turn, `p1` included. The first message to any agent wakes them all by typing a wake-up into each tab, `p1`'s too.
 
@@ -222,8 +244,10 @@ The script is `skills/partner/scripts/partner.py`, a thin entry point over the `
 - [`references/debate.md`](./skills/partner/references/debate.md) — opening a session and the debate loop
 - [`references/troubleshooting.md`](./skills/partner/references/troubleshooting.md) — symptoms, causes and fixes
 
-A `UserPromptSubmit` hook marks the Claude Code session's turn as open until the `Stop` hook sees it end, so the others never pause while that session is mid-work, and your message to it wakes a paused session. A `Stop` hook (`hooks/hooks.json`) keeps any agent — the session that ran the skill included — from ending a turn while a message addressed to it is still unanswered in the transcript. It is what stops the non-blocking session agent from going silent the moment the human's attention moves to another tab.
+A shared `UserPromptSubmit` hook marks the Claude Code or Codex session's turn as open until the `Stop` hook sees it end, so the others never pause while that session is mid-work, and your message to it wakes a paused session. A `Stop` hook (`hooks/hooks.json`) keeps any agent — the session that ran the skill included — from ending a turn while a message addressed to it is still unanswered in the transcript. It is what stops the non-blocking session agent from going silent the moment the human's attention moves to another tab.
 
 ## License
 
 [MIT](../LICENSE)
+
+Both hosts bind hooks to the session that started the debate, so another session in the same checkout does not wake or adopt it. Claude Code uses background Bash task notifications. Codex uses yielded shell processes and polls their tool session IDs while the turn stays active; it does not assume a process will wake a finished turn. See [host integration](skills/partner/references/hosts.md).

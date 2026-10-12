@@ -5,7 +5,7 @@ A tab agent participates by blocking on `wait`. When it ends its turn instead
 or because the baton moved away -- nothing re-invokes it and the next thing
 said to it lands in a transcript nobody is reading.
 
-Claude Code agents have a Stop hook to catch that. Any other CLI may or may
+Claude Code and Codex agents can have a plugin Stop hook to catch that. Any other CLI may or may
 not have an equivalent, and this plugin cannot require one -- so the recovery
 comes from outside the agent entirely: type into its tab, exactly as the human
 would. That works whatever is running in it. Every terminal with a control CLI

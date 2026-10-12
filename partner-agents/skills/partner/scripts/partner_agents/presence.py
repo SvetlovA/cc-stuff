@@ -95,7 +95,7 @@ def listening_soon(sd: Path, roster: dict, who: str, grace: float) -> bool:
 
 
 def turn_open(sd: Path, pid: str) -> bool:
-    """Is a Claude Code session agent in the middle of a turn?
+    """Is a host session agent in the middle of a turn?
 
     Its background `wait` stays in flight while it works on what the human
     asked, so `is_listening` cannot tell a session agent that is done from one

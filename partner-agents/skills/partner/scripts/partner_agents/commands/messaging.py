@@ -16,14 +16,16 @@ from ..idle import (
 )
 from ..presence import marker_live, read_marker, touch_seen, write_marker
 from ..prompts import EXPLORE_BRIEF, OPENING
-from ..state import baton_of, load_roster, me_id, read_pause, save_roster, state_dir
+from ..state import (
+    baton_of, is_bound_session, load_roster, me_id, read_pause, save_roster, state_dir,
+)
 from ..timing import CLAIM_GRACE, IDLE_CHECK, NUDGE_WINDOW, REDELIVER_WINDOW
 from ..transcript import (
     append_msg, baton_banner, commit_cursor, dropped_for, parse_msgs, pending_for,
     read_new, render, tail_msgs,
 )
 from ..util import (
-    NL, age_seconds, emit, nag_throttled, process_cmdline, unlink_quietly,
+    NL, age_seconds, emit, nag_throttled, process_cmdline, unlink_quietly, write_float,
 )
 from ..waker import ensure_waker
 from ..waking import (
@@ -42,6 +44,11 @@ def cmd_wait(args) -> int:
     sd = state_dir()
     roster = load_roster(sd)
     who = args.who or me_id(roster)
+    entry = roster['partners'].get(who) or {}
+    polled_session = (entry.get('kind') == 'session'
+                      and entry.get('provider') == 'codex'
+                      and who == me_id(roster) and is_bound_session(entry))
+    declared_idle = False
     deadline = time.time() + args.timeout
     # Whoever runs this is in its own tab right now; recording it is what lets a
     # pause stop this agent and a message type it awake again, like any other.
@@ -50,7 +57,7 @@ def cmd_wait(args) -> int:
     # Only an agent that cannot be typed awake keeps a wait through a pause --
     # see sleeps_through_pause. Everyone else stops, whoever started the session.
     sleeper = sleeps_through_pause(roster, who)
-    next_idle = 0.0              # check at once: a 10s-capped wait never reaches 15
+    next_idle = 0.0              # check for an idle session at once
     announced = False            # a sleeper says once that it is sleeping
     # Say what this command is doing *before* blocking, and flush it. Every CLI
     # caps how long a shell command may run, and a capped wait that has printed
@@ -60,7 +67,8 @@ def cmd_wait(args) -> int:
     if not args.json:
         print(f"[listening as {who} for up to {args.timeout}s. If this command "
               f"is cut short by your tool's own timeout, that is the timeout, "
-              f"not an answer -- run `wait` again immediately. Never end your "
+              f"not an answer -- restart only after it exits. If the tool yields "
+              f"a running session, poll that session instead. Never end your "
               f"turn without a wait in flight.]", flush=True)
     # <id>/waiting says who is polling for this agent. Only that one consumes
     # messages; a second `wait` for the same agent idles instead, because two
@@ -98,6 +106,13 @@ def cmd_wait(args) -> int:
                     return 0
                 time.sleep(args.poll)
                 continue
+            if polled_session and not declared_idle:
+                # Codex keeps its harness turn active while polling. Entering
+                # this wait declares work finished, so that open turn must not
+                # prevent the group's idle pause. Clear once, never a prompt
+                # that arrives while this wait is already running.
+                unlink_quietly(sd / who / 'turn')
+                declared_idle = True
             write_marker(sd, who, token, deadline)   # heartbeat
             touch_seen(sd, who)          # still here, still listening
             msgs, end = read_new(sd, who)
@@ -109,6 +124,8 @@ def cmd_wait(args) -> int:
                 commit_cursor(sd, who, end)
                 msgs = []
             if msgs:
+                if polled_session and not all(is_pause_notice(m) for m in msgs):
+                    write_float(sd / who / 'turn', time.time())
                 roster = load_roster(sd)
                 if args.json:
                     print(json.dumps({"baton": baton_of(roster), "you": who,
@@ -131,6 +148,8 @@ def cmd_wait(args) -> int:
             dropped = dropped_for(sd, roster, who)
             if dropped and not nag_throttled(sd / who / ".redeliver",
                                               REDELIVER_WINDOW):
+                if polled_session:
+                    write_float(sd / who / 'turn', time.time())
                 if args.json:
                     print(json.dumps({"baton": baton_of(roster), "you": who,
                                       "messages": dropped, "redelivered": True},

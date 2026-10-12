@@ -1,6 +1,6 @@
 {
   "name": "pr-review-toolkit",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Address supplied review feedback, or fetch GitHub PR and Orca editor comments before applying code fixes. Thread resolution and pushing are left to the user.",
   "author": {
     "name": "SvetlovA",

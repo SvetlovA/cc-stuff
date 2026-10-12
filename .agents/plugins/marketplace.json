@@ -1,0 +1,32 @@
+{
+  "name": "SvetlovA-cc-stuff",
+  "interface": {
+    "displayName": "SvetlovA cc-stuff"
+  },
+  "plugins": [
+    {
+      "name": "partner-agents",
+      "source": {
+        "source": "local",
+        "path": "./partner-agents"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "pr-review-toolkit",
+      "source": {
+        "source": "local",
+        "path": "./pr-review-toolkit"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -54,28 +54,49 @@ def me_id(roster: dict) -> str:
     return os.environ.get("PARTNER_ID") or roster.get("self") or "p1"
 
 
-def claude_session() -> str:
-    """The Claude Code session this process runs under, "" outside one.
+def session_host() -> str:
+    """Detect the host of the calling shell; explicit --me-provider wins."""
+    if os.environ.get("CODEX_THREAD_ID"):
+        return "codex"
+    if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return "claude"
+    return ""
 
-    The same id Claude Code hands its hooks as `session_id`.
-    """
-    return os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+
+def host_session(host: str) -> str:
+    """Return the id the host also supplies to hooks as session_id."""
+    key = {"claude": "CLAUDE_CODE_SESSION_ID", "codex": "CODEX_THREAD_ID"}.get(host)
+    return os.environ.get(key, "") if key else ""
 
 
-def is_bound_session(entry: dict, sid: str | None = None) -> bool:
+def bind_session(entry: dict, host: str | None = None) -> None:
+    host = host or session_host() or entry.get("provider") or ""
+    entry["session_host"] = host
+    entry["session_id"] = host_session(host)
+    entry.pop("cc_session", None)  # legacy Claude-only binding
+
+
+def is_bound_session(entry: dict, sid: str | None = None,
+                     host: str | None = None) -> bool:
     """Is this process the session agent `entry` names?
 
     The session agent has no wrapper of its own, so `me_id` falls back to
     roster["self"] for *every* process in the repo without PARTNER_ID -- and
-    the plugin's hooks fire in every Claude Code session opened there. Without
+    the plugin's hooks fire in every enabled host session opened there. Without
     this check, an unrelated session typing a prompt counted as the human
     writing to the session agent: it lifted the pause, was then told by the
     Stop hook to run `wait`, and that `wait` recorded the unrelated tab as the
     session agent's -- so later wake-ups were typed into it. `init` and
     `resume` record which session owns the entry; nothing else may act as it.
     """
-    sid = claude_session() if sid is None else sid
-    return (entry.get("cc_session") or "") == sid
+    bound_host = entry.get("session_host") or "claude"
+    if host is not None and host != bound_host:
+        return False
+    sid = host_session(bound_host) if sid is None else sid
+    bound_id = entry.get("session_id", entry.get("cc_session", ""))
+    # An unbound session cannot claim a hook with an id. Preserve manual use
+    # outside either host, where both ids are empty.
+    return (bound_id or "") == sid
 
 
 def baton_of(roster: dict) -> str:

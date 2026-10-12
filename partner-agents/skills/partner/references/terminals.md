@@ -120,7 +120,7 @@ Every terminal then only has to run one plain file path with no arguments — wh
 
 ## Typing into a tab that has gone quiet
 
-A tab agent whose CLI ended its turn cannot be reached from inside the system — nothing re-invokes it, and only Claude Code has a Stop hook. The recovery is to type into its tab the way the human would, and that works whatever is running in it.
+A tab agent whose CLI ended its turn cannot be reached from inside the system — nothing re-invokes it, and the shared Stop hook runs only when enabled in Claude Code or trusted in Codex. The recovery is to type into its tab the way the human would, and that works whatever is running in it.
 
 `spawn` records which terminal owns each tab (`tab_kind`, `tab_handle`, `tab_title` on the roster entry), because the owning terminal is not recoverable after the fact. `nudge` then reads that entry's `send` template. A terminal with no `send` reports that it cannot be typed into and prints the command that restarts the agent instead — relay it.
 

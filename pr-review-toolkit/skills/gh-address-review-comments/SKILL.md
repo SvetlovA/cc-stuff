@@ -4,7 +4,7 @@ description: This skill should be used when the user asks to "fetch GitHub revie
 argument-hint: "[pr-number]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Skill
 metadata:
-  version: "0.7.0"
+  version: "0.7.1"
 ---
 
 # GitHub Address Review Comments

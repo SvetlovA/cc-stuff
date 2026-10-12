@@ -99,13 +99,10 @@ is acting, not waiting on a reply.)
 
 ## Staying in the loop
 
-The hook only exists inside Claude Code. Everywhere else the loop holds because
+The hook works in Claude Code and Codex when installed and enabled (trusted in Codex). Follow [host integration](hosts.md) for the host's wait mechanism. Everywhere else the loop holds because
 each agent keeps running `wait`, so the two ways it breaks are worth naming:
 
-- **A `wait` that returns early or empty is the CLI's command-runtime cap, not
-  an answer.** Run it again immediately. The shortest cap measured kills a
-  command after 10s, which is shorter than any wait; each briefing says what
-  its own CLI does about it.
+- **Distinguish a tool yield from a completed wait.** Poll the existing Codex tool session after a yield. After a completed empty timeout, run the wait again. Follow the provider's briefing and [host integration](hosts.md).
 - **Exactly one `wait` at a time.** Two split the inbox: each message goes to
   whichever polls first, and one you never read is one you never answer. A
   duplicate idles and says so; `read` tells you whether one is already in

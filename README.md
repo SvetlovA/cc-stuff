@@ -6,23 +6,42 @@ A public collection of plugins for developer workflows. See each plugin for its 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 1.0.0 |
-| [pr-review-toolkit](./pr-review-toolkit/) | Address supplied review feedback or fetch GitHub PR and Orca editor comments in Claude Code and Codex | 0.7.0 |
+| [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 1.1.0 |
+| [pr-review-toolkit](./pr-review-toolkit/) | Address supplied review feedback or fetch GitHub PR and Orca editor comments in Claude Code and Codex | 0.7.1 |
 
 ## Installing a Plugin
 
-### Install from GitHub
+### Claude Code
 
 ```bash
-cc plugin install https://github.com/SvetlovA/cc-stuff/tree/master/<plugin-name>
+claude plugin marketplace add SvetlovA/cc-stuff
+claude plugin install partner-agents@SvetlovA-cc-stuff
+claude plugin install pr-review-toolkit@SvetlovA-cc-stuff
 ```
 
-### Install locally (for development or testing)
+Invoke skills with `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
+
+### Codex
+
+```bash
+codex plugin marketplace add SvetlovA/cc-stuff
+codex plugin add partner-agents@SvetlovA-cc-stuff
+codex plugin add pr-review-toolkit@SvetlovA-cc-stuff
+```
+
+Invoke skills with `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.
+
+### Local development
 
 ```bash
 git clone https://github.com/SvetlovA/cc-stuff.git
-cc --plugin-dir ./cc-stuff/<plugin-name>
+cd cc-stuff
+claude --plugin-dir ./partner-agents --plugin-dir ./pr-review-toolkit
 ```
+
+For Codex, register the checkout with `codex plugin marketplace add .`, then install the plugins with the same `codex plugin add` commands above. Restart the host session after changing installed plugin files.
+
+Both hosts use the same skills and scripts. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json`. Each plugin includes a manifest for each host.
 
 ## Plugin Overview
 
@@ -50,7 +69,11 @@ Runs several AI agents as equal partners, each in its own terminal tab, so decis
 - **Liveness-aware**: heartbeats tell it whether partners are really running, so a partner whose tab you closed shows as stale rather than trusted to be alive
 - **Session history**: `/partner` starts a new session and archives the last one whole (a no-op if nothing was running); `/partner add` joins the debate in progress; `resume` rebuilds every agent with its model and re-briefs it from the transcript, continuing the argument rather than restarting it
 
-**Invoke with:** `/partner [provider] [model] [effort]` for a fresh session, `/partner add [provider ...]` to join one, plus `/partner resume [id]`, `/partner list`, `/partner baton <id>`, `/partner stop`
+**Claude Code:** `/partner-agents:partner [provider] [model] [effort]`
+
+**Codex:** `$partner [provider] [model] [effort]`
+
+Use `add`, `resume`, `list`, `baton`, or `stop` after the skill name to manage a session.
 
 **Requires:** Python 3.9+ and at least one agent CLI installed
 
@@ -80,12 +103,12 @@ Contributions welcome! To add a plugin:
 
 1. Fork this repo
 2. Create a new directory at the repo root: `my-plugin-name/`
-3. Follow the [plugin structure](CLAUDE.md) — at minimum a `.claude-plugin/plugin.json` and at least one skill or component
+3. Follow the [plugin structure](AGENTS.md) — include matching Claude Code and Codex manifests and at least one skill or component
 4. Add a `README.md` for your plugin
-5. Update the table above
+5. Add entries to both marketplace registries and update the table above
 6. Open a PR
 
-See [CLAUDE.md](./CLAUDE.md) for conventions around skill writing, naming, and path portability.
+See [AGENTS.md](./AGENTS.md) for conventions around skill writing, naming, and path portability.
 
 ## License
 

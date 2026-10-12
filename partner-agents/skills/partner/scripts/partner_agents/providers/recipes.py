@@ -74,18 +74,14 @@ RECIPES: dict[str, dict] = {
               "efforts": {"low", "medium", "high"},
               "install": "npm install -g @openai/codex",
               "login": "codex login",
-              # Verified against codex 0.15x: the exec tool's yield_time_ms
-              # defaults to 10s, which is shorter than any useful wait.
               "wait_note": (
-                   "Your exec tool terminates a command after 10s by default, "
-                   "which is shorter than a `wait`. Pass an explicit long "
-                   "runtime every time you call it -- `timeout_ms` / "
-                   "`yield_time_ms` of 600000, or a first-line "
-                   "`// @exec: {\"yield_time_ms\": 600000}` pragma in code "
-                   "mode. If it still returns early or empty, that is the cap "
-                   "expiring, not an answer and not an error: run `wait` again "
-                   "immediately, and never treat a short or silent wait as a "
-                   "reason to end your turn.")},
+                   "exec_command may yield a session_id while the process is "
+                   "still running. Poll that id with write_stdin until exit; "
+                   "yield_time_ms controls when output is returned, not the "
+                   "process lifetime. In code mode, if functions.exec yields "
+                   "a cell_id, resume it with functions.wait. Keep exactly one "
+                   "partner wait running. Re-arm only after it exits and its "
+                   "messages are handled; an empty timeout is normal.")},
     "gemini": {"bin": "gemini", "tui": _gemini_tui, "effort": "prompt",
                "efforts": set(EFFORT_HINT),
                "install": "npm install -g @google/gemini-cli",

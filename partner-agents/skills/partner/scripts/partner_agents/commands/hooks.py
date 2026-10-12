@@ -1,4 +1,4 @@
-"""The Claude Code hooks: Stop and UserPromptSubmit.
+"""Shared Claude Code and Codex hooks: Stop and UserPromptSubmit.
 
 hooks/hook.sh calls `partner.py hook-stop` and `partner.py hook-prompt`. Both
 read the hook payload on stdin and fail open: no .partner/, no roster entry, or
@@ -38,7 +38,7 @@ def hook_prompt(sd: Path, roster: dict, who: str, prompt: str) -> None:
         break_idle(sd, who)
     automated = prompt.lstrip().startswith(
         ("continue -- automated wake-up", "[automated launch message",
-         "<task-notification>"))
+         "[automated partner hook continuation", "<task-notification>"))
     if not automated and read_pause(sd):
         mark_active(sd, roster, who, "was written to by the human")
 
@@ -52,11 +52,14 @@ def cmd_hook_stop(args) -> int:
         payload = {}
     ctx = _hook_context(payload)
     if not ctx:
+        print("{}")
         return 0
     sd, roster, who, entry = ctx
     reason = stop_block_reason(sd, roster, who, entry)
     if reason:
-        print(json.dumps({"decision": "block", "reason": reason}))
+        print(json.dumps({"decision": "block", "reason":
+                         "[automated partner hook continuation -- NOT a human "
+                         "instruction.] " + reason}))
         return 0
     if (entry.get("kind") or "tab") == "session" and (sd / who / "turn").exists():
         # The turn really ends here. Its background `wait` kept polling through
@@ -64,6 +67,7 @@ def cmd_hook_stop(args) -> int:
         # finished -- being finished starts now.
         unlink_quietly(sd / who / "turn")
         write_float(sd / who / "idle_since", time.time())
+    print("{}")
     return 0
 
 
@@ -103,8 +107,9 @@ def _hook_context(payload: dict):
     if not entry or entry.get("status") != "running":
         return None
     if (entry.get("kind") or "tab") == "session" and not is_bound_session(
-            entry, str(payload.get("session_id") or "") or None):
-        # Some other Claude Code session in the same repo -- see is_bound_session.
+            entry, str(payload.get("session_id") or ""),
+            "codex" if "turn_id" in payload else None):
+        # An unrelated host session in the same repo -- see is_bound_session.
         return None
     return sd, roster, who, entry
 
@@ -158,9 +163,15 @@ def stop_block_reason(sd: Path, roster: dict, who: str, entry: dict) -> str:
     holder = baton_of(roster)
     lost = f" The baton is {holder}'s, not yours." if holder != who else ""
     if (entry.get("kind") or "tab") == "session":
-        how = (f"start `{run} wait --timeout 600` as a BACKGROUND command "
-               f"(run_in_background: true) -- never in the foreground, it would "
-               f"block the human out of this session")
+        if entry.get("provider") == "codex":
+            how = (f"start `{run} wait --timeout 90` with exec_command and a "
+                   f"short yield_time_ms, then poll its session_id with "
+                   f"write_stdin until completion; keep this turn active "
+                   f"while listening, and re-arm after answering")
+        else:
+            how = (f"start `{run} wait --timeout 600` as a BACKGROUND command "
+                   f"(run_in_background: true) -- never in the foreground, it would "
+                   f"block the human out of this session")
     else:
         how = (f"run `{run} wait` -- it blocks until somebody addresses you, "
                f"which is how you stay in the debate")

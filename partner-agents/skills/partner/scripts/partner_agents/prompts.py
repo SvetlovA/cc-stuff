@@ -29,12 +29,11 @@ EFFORT_HINT = {
 # and `efforts` do. Nothing here is a gate, and a CLI with no note is fully
 # briefed by the generic one.
 GENERIC_WAIT_NOTE = (
-    "Find out your own limit once and work with it: if `wait` comes back early "
-    "-- especially with no output at all -- that is your shell tool's own cap "
-    "on how long a command may run, not a failure and not an answer. Raise the "
-    "timeout you pass that tool if it takes one, and either way run `wait` "
-    "again immediately. Never treat a short or silent `wait` as a reason to end "
-    "your turn.")
+    "Read your shell tool's yield and timeout behavior. A returned running "
+    "process/session ID means poll that same process, not start another wait. "
+    "If the process actually exits with an empty timeout, run wait again. "
+    "Adjust a real execution timeout when needed, and keep exactly one wait "
+    "in flight. Do not treat a short or silent wait as the end of the debate.")
 
 
 SEED = """# You are "{id}"
@@ -259,20 +258,17 @@ that is another agent noticing your silence: `read`, answer what is there, and
 get back into `wait`. You can do the same for them -- `{run} nudge` types a
 wake-up into the tab of anyone nothing is listening for.
 
-A Stop hook holds you to both halves of that in Claude Code: it blocks the turn
-from ending while a message to you or `@all` is unanswered, and again if no
-`wait` is in flight for you. Other CLIs have no such hook, which is exactly why
+An enabled plugin Stop hook holds you to both halves in Claude Code and Codex:
+it blocks the turn from ending while a message to you or `@all` is unanswered, and again if no
+`wait` is in flight for you. Hosts without enabled hooks rely on the loop, so
 the discipline has to be yours.
 """
 
 LOOP_SESSION = """
-You run inside Claude Code and reach the human through your own harness, not a
+You run inside {host_name} and reach the human through your own harness, not a
 terminal tab. That changes only *how you wait*, not the loop.
 
-Never run `wait` in the foreground -- it would block your harness and stop the
-human talking to you. Run it as a BACKGROUND shell command instead (the Bash
-tool with run_in_background: true). Claude Code re-invokes you when it returns --
-someone spoke, or it timed out.
+{wait_instruction}
 
 **Exactly ONE background `wait`, ever.** Before arming another, check whether one
 is already running -- your own background task list, or `{run} pending` and the
@@ -315,8 +311,7 @@ Every turn:
    c. Never `{run} claim`, never edit. Only the human moves the baton.
    d. If `read` shows nothing new, you already handled it.
 
-4. END of every turn, always: start one `{run} wait --timeout 600` as a
-   background command, then end your turn. When it returns, go to step 1.
+4. LISTEN after answering: {listen_step} When it returns, go to step 1.
 
 Step 4 is not optional and has no exceptions. A discussion reaching its
 conclusion is not an exit, and neither is the baton moving to somebody else --
@@ -324,7 +319,7 @@ those are the two moments you are most tempted to call it done, and exactly when
 the group is about to say the thing you need to hear. Losing the baton demotes
 you to advisor; it does not excuse you from listening.
 
-Stop only on a system message saying you were stopped. A Stop hook holds you to
+Stop only on a system message saying you were stopped, or a pause. An enabled Stop hook holds you to
 both halves of this: it blocks the turn from ending while a message to you or
 `@all` is unanswered, and again if no `wait` is in flight for you.
 
@@ -334,7 +329,9 @@ agents stop looping so they stop spending a model turn per cycle. So end a turn
 only when all of it is done -- every message to you answered (`{run} pending`
 is empty), the change finished and reported, nothing you said you would check
 left unchecked. A hook marks your turn open from the human's message until it
-really ends, so the others never pause while you are mid-turn.
+really ends, so the others never pause while you are mid-turn. For a Codex
+session, entering the polled wait declares work finished and closes that marker;
+a delivered work message reopens it.
 
 While paused you stop exactly like everyone else: when your `wait` returns
 saying the session is paused, do NOT arm another -- end your turn. That is the

@@ -55,17 +55,43 @@ def build_seed(pid: str, roster: dict, root: Path, sd: Path,
     # Each CLI caps command runtime differently, and a capped `wait` returning
     # early is the most common reason an agent talks itself out of the loop --
     # so the cap its own CLI imposes goes in its own briefing.
+    codex = p.get("provider") == "codex"
+    host_name = "Codex" if codex else p.get("provider") or "the host"
+    wait_instruction = (
+        "Start `wait` with exec_command and a short yield_time_ms. If it yields "
+        "a session_id, poll that same process with write_stdin until it exits. "
+        "A yield is not a timeout or completion. Keep the turn active while "
+        "listening; do not assume a running process will re-invoke the model "
+        "after a final answer. If the host provides completion notifications, "
+        "use its documented background-task mechanism instead."
+        if codex else
+        "Run `wait` as a BACKGROUND shell command (Claude Code Bash with "
+        "run_in_background: true). The task notification re-invokes the "
+        "session when it returns. Never block the harness in the foreground.")
+    listen_step = (
+        f"start one `{run} wait --timeout 90` and poll its tool session until "
+        "completion, keeping this turn active."
+        if codex else
+        f"start one `{run} wait --timeout 600` as a background command, "
+        "then end the turn.")
     loop = (LOOP_SESSION if kind == "session" else LOOP_TAB).format(
-        run=run, wait_note=wait_note(p.get("provider") or ""))
+        run=run, wait_note=wait_note(p.get("provider") or ""),
+        host_name=host_name, wait_instruction=wait_instruction,
+        listen_step=listen_step)
     human_input = ("They type into your terminal tab."
                    if kind == "tab" else
-                   "They reach you through your own Claude Code harness, not a "
+                   f"They reach you through your own {host_name} harness, not a "
                    "terminal tab -- and they may instead be typing in another "
                    "agent's tab, which is why your loop keeps a background `wait`.")
-    start = ("Now run step 1." if kind == "tab"
-             else "Run step 1 (`read`) now, then step 4 -- arm the background "
-                  "`wait` and end your turn. You will be re-invoked when the "
-                  "human or a partner needs you.")
+    if kind == "tab":
+        start = "Now run step 1."
+    elif codex:
+        start = ("Run step 1 (`read`) now, then step 4 -- start the wait and poll "
+                 "its tool session while keeping the turn active.")
+    else:
+        start = ("Run step 1 (`read`) now, then step 4 -- arm the background "
+                 "`wait` and end your turn. You will be re-invoked when the "
+                 "human or a partner needs you.")
     return SEED.format(
         id=pid, cwd=root, peers=peers, chat=sd / "chat.md", run=run,
         timeout=WAIT_TIMEOUT, baton=baton_of(roster),

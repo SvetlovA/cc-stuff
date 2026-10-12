@@ -20,18 +20,28 @@ Thread resolution, replies, Orca note cleanup, commits, and pushing remain manua
 
 ### Claude Code
 
+Inside Claude Code, use `/plugin install pr-review-toolkit --marketplace SvetlovA/cc-stuff`, or run:
+
 ```bash
-cc plugin install https://github.com/SvetlovA/cc-stuff/tree/master/pr-review-toolkit
+claude plugin marketplace add SvetlovA/cc-stuff
+claude plugin install pr-review-toolkit@SvetlovA-cc-stuff
 ```
 
 For local development:
 
 ```bash
 git clone https://github.com/SvetlovA/cc-stuff.git
-cc --plugin-dir ./cc-stuff/pr-review-toolkit
+claude --plugin-dir ./cc-stuff/pr-review-toolkit
 ```
 
 ### Codex
+
+```bash
+codex plugin marketplace add SvetlovA/cc-stuff
+codex plugin add pr-review-toolkit@SvetlovA-cc-stuff
+```
+
+For local development, register the checkout with `codex plugin marketplace add ./cc-stuff`, install with the same `codex plugin add` command, and restart the session. See [Codex plugin packaging](https://developers.openai.com/plugins/build/plugins).
 
 The plugin includes a `.codex-plugin/plugin.json` manifest pointing to the same `skills/` directory. For standalone local skill installation, clone the repository and copy all three skill folders together:
 

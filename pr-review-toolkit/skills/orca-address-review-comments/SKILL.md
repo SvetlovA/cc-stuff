@@ -4,7 +4,7 @@ description: This skill should be used when the user asks to "address Orca revie
 argument-hint: "[worktree-selector]"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Skill
 metadata:
-  version: "0.7.0"
+  version: "0.7.1"
 ---
 
 # Orca Address Review Comments

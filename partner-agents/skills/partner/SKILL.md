@@ -3,7 +3,8 @@ name: partner
 description: This skill should be used when the user asks to "create a partner", "spawn a partner", "/partner", "/partner add", "start a partner agent", "add a peer agent", "get a second opinion from another model", "debate this with codex", "argue this with gemini", "have another AI review this with me", or wants another AI agent running in its own terminal tab to challenge decisions. Use it also to hand over the write baton, list agents, check whether they have finished, or stop them. Critically — once any partner is active (a `.partner/roster.json` with a running entry exists in the repo), use this skill on EVERY subsequent question and decision in the session to run the debate protocol before answering, not just when the user names it.
 argument-hint: "[provider] [model] [effort]  ·  add [provider ...] | resume [id] | sessions | list | baton <id> | idle | stop"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, WebSearch, WebFetch, Skill
-version: 0.20.1
+metadata:
+  version: "1.1.0"
 ---
 
 # Partner
@@ -17,10 +18,16 @@ A partner is not a subagent. It is a full interactive session with its own model
 All commands go through one script:
 
 ```bash
-P="${CLAUDE_PLUGIN_ROOT}/skills/partner/scripts/partner.py"
+P="<resolved-skill-directory>/scripts/partner.py"
 ```
 
 After `init` a short wrapper also exists at `.partner/p.cmd` (Windows) or `.partner/p.sh` (macOS/Linux). That is what the partners themselves use.
+
+## Host integration
+
+Use `/partner-agents:partner` in Claude Code and `$partner` in Codex. Interpret `/partner` below as shorthand for either invocation. Use the host's available shell, file, search, question, and skill-loading tools; Claude tool names in frontmatter do not require those tools in Codex. When no Skill tool exists, read the requested skill's `SKILL.md` and follow it in the current session.
+
+Resolve `P` from the active skill's installed directory: `<skill-directory>/scripts/partner.py`. In hooks, `${PLUGIN_ROOT}` (Codex) or `${CLAUDE_PLUGIN_ROOT}` (Claude Code and Codex compatibility) points to the plugin root. These variables are not guaranteed in ordinary skill shell calls; never guess a cache path. Read [host integration](references/hosts.md) before starting a session or entering its wait loop.
 
 ## The write baton
 
@@ -110,7 +117,7 @@ python "$P" models --provider <X>    # ids this machine names, and the effort th
 
 **Check the web when the local answer is thin or dated.** A model released after the installed CLI was built is mentioned nowhere on this machine. Search for that provider's current lineup, offer what you find alongside the local ids, and say which is which — anything can be passed to `--model` whether or not the scan saw it.
 
-**Never pick the model silently.** Put the options to the user with `AskUserQuestion` — installed providers first, each with the effort `models` recommends and its one-line character note. A partner the user did not choose is one they will not believe when it disagrees with them, which is the entire point of running it. Ask even when they supplied the provider, unless they also named the model.
+**Never pick the model silently.** Put the options to the user with the host's question tool, or a direct question when unavailable — installed providers first, each with the effort `models` recommends and its one-line character note. A partner the user did not choose is one they will not believe when it disagrees with them, which is the entire point of running it. Ask even when they supplied the provider, unless they also named the model.
 
 When they genuinely say "just pick": the newest **named** id in a balanced or deep tier, from a provider *different from your own model* — same-model agents tend to agree with you. Say which you chose and why.
 
@@ -170,7 +177,7 @@ Confirm with `python "$P" list` before reporting success. Two or more agents mea
 
 ### Step 4 — Ask what to start on, then open the session
 
-A briefed roster is not yet a debate: everyone is blocked on `wait` and nobody has been asked anything. So ask, with `AskUserQuestion`, and **accept anything as the answer**:
+A briefed roster is not yet a debate: everyone is blocked on `wait` and nobody has been asked anything. So ask, with the host's question tool, or a direct question when unavailable, and **accept anything as the answer**:
 
 - **Free text** — a task, a question, a bug, a half-formed doubt. It becomes the opening instruction, verbatim.
 - **Another skill or slash command** — `/brainstorm`, `/planning:make`, a project skill. Invoke it and run *its* workflow, with the debate protocol wrapped around the decisions it reaches; the partners do not have that skill, so relay what they need in order to argue with it.
@@ -196,11 +203,11 @@ python "$P" read                     # 1. pick up anything already said
 python "$P" wait --timeout 600       # 2. run this as a BACKGROUND command
 ```
 
-The second must be **backgrounded** (the Bash tool with `run_in_background: true`) — in the foreground it blocks the harness and the user cannot talk to this session. Claude Code re-invokes this session when it returns, which is the whole mechanism: one background `wait` in flight, re-armed at the end of every turn thereafter.
+In Claude Code, background the second command with Bash `run_in_background: true`; its completion notification re-invokes the session. In Codex, start it with `exec_command` and a short `yield_time_ms`, then poll the returned `session_id` with `write_stdin` while keeping the turn active. Resume a yielded `functions.exec` cell with `functions.wait`. A yield leaves the process running; do not start a duplicate. Use `--timeout 90` for polling waits and follow [host integration](references/hosts.md).
 
 `.partner/<id>/lastseen` is the proof it is running — the stamp refreshes every few seconds while `wait` polls. Missing or minutes old means this session is deaf, whatever the roster claims.
 
-**A `wait` that returns early or empty is never a reason to stop.** Every agent CLI caps how long one command may run — the two measured here differ by more than tenfold — so a capped `wait` comes back with nothing, and an agent reading that as a broken command leaves the loop for good. Every briefing states the rule for whatever CLI the agent is running, plus that CLI's specific cap when one is known (`references/providers.md`); either way, run `wait` again.
+**A `wait` that returns early or empty is never a reason to stop.** Distinguish a yielded tool call from a completed process: poll the existing tool session after a yield, and start a new wait only after the process exits. An actual empty timeout is normal. Every briefing states the rule for whatever CLI the agent is running, plus that CLI's specific cap when one is known (`references/providers.md`); either way, run `wait` again.
 
 **Nothing is delivered once and forgotten.** `wait` checks the transcript for anything addressed to an agent and still unanswered, not only what its cursor has not seen — so a message dropped by a killed `wait` or by a turn that ended without replying comes back marked *re-delivered* instead of needing another agent to notice. What clears a debt is a reply to that sender (or one to `@all`); `pending` shows what is owed and to whom.
 
@@ -236,7 +243,7 @@ python "$P" idle --after 300      # require 5 min instead of 1; --after 0 = neve
 
 ### When a partner goes quiet
 
-A tab agent whose CLI ended its turn is unreachable — nothing re-invokes it, and only Claude Code has the Stop hook. `read`, `wait` and `send` name any agent with no `wait` in flight, and the fix is to type into its tab:
+A tab agent whose CLI ended its turn is unreachable — nothing re-invokes it, and an enabled Stop hook is available in Claude Code and Codex. Other hosts rely on the loop and wake-ups. `read`, `wait` and `send` name any agent with no `wait` in flight, and the fix is to type into its tab:
 
 ```bash
 python "$P" nudge [--id p2]        # one, or everyone who stopped listening
@@ -254,7 +261,7 @@ There are two roles and the **baton** decides which is yours: the holder acts, e
 
 **Not holding it:** advise whoever does, and debate the other advisors directly — `send --to p3`, not only `@all`. Several agents settling a question among themselves and handing the holder one recommendation is the design. Never `claim` or edit; only the user moves the baton.
 
-This session, when it is not the holder, joins through a background `wait` (`run_in_background`) — one in flight, re-armed each turn — which is what keeps it in the debate while the user works in a partner's tab. `references/debate.md` has the mechanics.
+This session, when it is not the holder, joins through one `wait` using the host's asynchronous shell mechanism — Claude background tasks or Codex yielded-process polling — which keeps it in the debate while the user works in a partner's tab. `references/debate.md` has the mechanics.
 
 Skip the loop only for mechanical lookups. Anything involving a design choice, a trade-off, a code change, or an unclear cause goes to the partners.
 
@@ -306,6 +313,7 @@ A `UserPromptSubmit` hook opens this session's turn (so nobody pauses while it w
 
 ## Deeper reference
 
+- [references/hosts.md](references/hosts.md) — invocation, helper paths, session identity, hooks, and asynchronous waits in Claude Code and Codex.
 - `references/providers.md` — how CLIs and models are discovered on the machine, per-provider launch flags, auto levels and effort, and how to use or keep a custom CLI.
 - `references/protocol.md` — transcript format, state layout, and how an agent takes part from inside its tab.
 - `references/debate.md` — the full debate loop, step by step.

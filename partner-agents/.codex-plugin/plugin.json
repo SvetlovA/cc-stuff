@@ -1,0 +1,30 @@
+{
+  "name": "partner-agents",
+  "version": "1.1.0",
+  "description": "Run several AI agents (whatever agent CLIs your machine has, plus any you describe) as equal partners, each in its own terminal tab, debating every decision through a shared transcript with an exclusive write baton. Providers and models are discovered on the machine, never read off a bundled list.",
+  "author": {
+    "name": "SvetlovA",
+    "url": "https://github.com/SvetlovA"
+  },
+  "homepage": "https://github.com/SvetlovA/cc-stuff/tree/master/partner-agents",
+  "repository": "https://github.com/SvetlovA/cc-stuff",
+  "license": "MIT",
+  "keywords": [
+    "multi-agent",
+    "debate",
+    "peer-review",
+    "terminal",
+    "cross-platform",
+    "codex",
+    "gemini",
+    "orca",
+    "validation",
+    "sessions",
+    "resume",
+    "discovery",
+    "any-cli",
+    "idle-pause"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

@@ -14,5 +14,6 @@
       "source": "./pr-review-toolkit",
       "description": "Address supplied review comments, or fetch GitHub PR and Orca editor feedback, then apply code fixes"
     }
-  ]
+  ],
+  "description": "Developer workflow plugins for Claude Code and Codex"
 }

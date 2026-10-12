@@ -162,7 +162,7 @@ Because these are byte offsets rather than message indexes, an agent that was cl
 
 ### The cursor moves only after delivery succeeds
 
-`read_new` does not advance the cursor; `commit_cursor` does, after the output has been printed and flushed. The two were one step until a message went missing: a `wait` killed between "cursor advanced" and "output reached the model" consumed the message and lost it, and no later `wait` could return it, because the cursor was already past. That is not a rare race: every CLI caps command runtime, and a cap shorter than the wait makes the kill routine rather than exceptional — the shortest measured here fires after 10s. Delivering a message twice costs a duplicate; delivering it zero times costs the debate a participant.
+`read_new` does not advance the cursor; `commit_cursor` does, after the output has been printed and flushed. The two were one step until a message went missing: a `wait` killed between "cursor advanced" and "output reached the model" consumed the message and lost it, and no later `wait` could return it, because the cursor was already past. That is not a rare race: every CLI caps command runtime, and a cap shorter than the wait makes the kill routine rather than exceptional — a process killed before output is read can still lose its delivery. Delivering a message twice costs a duplicate; delivering it zero times costs the debate a participant.
 
 ### `wait` asks the transcript, not just the cursor
 
@@ -205,15 +205,11 @@ Any agent can run any of these, `spawn` included. `.partner/p.sh` (no id) is the
 
 `wait` is what makes an interactive session autonomous. It polls the transcript and blocks until a message arrives for that agent, so the agent has something to answer rather than needing to be driven. It always returns within `--timeout` (default 90s) even when nothing arrives, which matters twice over: the tab never looks wedged, and the human can interrupt and type instead.
 
-### Command-runtime caps, and why they end debates
+### Tool yields and command timeouts
 
-Every agent reaches `wait` through its own CLI's shell tool, and every one of those caps how long a command may run. The two measured here differ by more than tenfold: one CLI's exec tool terminates at **10s** by default, another's Bash tool at **120s**. A wait longer than the cap is killed mid-poll, and — before this was handled — returned nothing at all. An agent reading an empty result from the command its entire loop depends on concludes the command is broken and ends its turn, which for a tab agent is permanent: nothing re-invokes it.
+Each host has its own shell execution protocol. A Codex execution tool may return a running session ID after yielding output; the process continues and must be polled with `write_stdin`. A Claude Bash command can time out or run as a background task. Follow [host integration](hosts.md) and the active tool documentation to distinguish a running process from a completed wait. Never start a second wait after a yield.
 
-Three changes make the loop survive that:
-
-- **`wait` announces itself before blocking**, flushed, so a killed call still prints the line telling the agent that a short return is the cap expiring and to run `wait` again. The output an agent gets from a truncated command is now instructions rather than silence.
-- **Every briefing states the rule, whatever the agent is running:** an early or empty `wait` is the tool's cap, so raise the timeout if the tool takes one and re-run it either way. A *specific* cap is an accelerator on top, and it travels with the rest of that CLI's launch facts — `wait_note` in a recipe or in the user's own `providers.json`, returned by `resolve_provider` like `install` or `efforts`. A CLI nobody has measured is still fully briefed by the rule.
-- **The default dropped from 120s to 90s**, since a default sitting exactly on a known cap turned every normal wait into a tool error. 90s still stamps a heartbeat well inside the 360s liveness window.
+`wait` announces itself before polling and uses a 90s default. Every briefing includes the provider's `wait_note`. An actual empty timeout means listen again after confirming the process exited. A killed process may require restarting the wait; a yielded process requires polling the existing one.
 
 ### One wait consumes at a time
 
@@ -234,7 +230,7 @@ The session agent backgrounds its `wait`, so a Stop firing immediately afterward
 
 ### Waking an agent that stopped listening
 
-A Stop hook only exists inside Claude Code. Any other CLI may or may not have an equivalent, and this plugin cannot require one — so for a tab that ends its turn the recovery comes from outside the agent entirely: type into the tab, exactly as the human would. That works whatever is running in it.
+The shared Stop hook is available in Claude Code and Codex when enabled and trusted. Other CLIs may or may not have an equivalent, and this plugin cannot require one — so for a tab that ends its turn the recovery comes from outside the agent entirely: type into the tab, exactly as the human would. That works whatever is running in it.
 
 ```bash
 .partner/p.sh nudge --id p2      # one agent
@@ -266,7 +262,7 @@ Without a live waker, a failed nudge says so: `nudged: false`, with the reason a
 
 The briefing tells each agent to loop — `wait`, think, `send`, repeat — and what it does on each pass turns on whether it holds the baton. The holder runs the debate and makes the change (state a position, `send --to @all --wait`, weigh the replies, act). Everyone else advises — and not only in reply to the holder: any non-holder can open a thread with any other, `send --to p3` as readily as `--to @all`, so three or four agents can work a question out among themselves and hand the holder a joint recommendation. The baton moves with the human's attention; each `wait` and `read` reprints the holder, and an agent switches roles the moment it changes.
 
-The one agent that does **not** block on `wait` is the session someone typed the skill into. It reaches the human through its own Claude Code harness, and a foreground block would stop them talking to it — so its briefing has it run `wait` as a **background** command instead. Claude Code re-invokes it when that returns (a partner spoke, or it timed out), which is what keeps it in the debate even while the human is working in another agent's tab. Without this it would sit idle any time the conversation moved to a tab — participating only when addressed in its own session. It keeps exactly one background `wait` in flight and re-arms it at the end of every turn. That is the only difference between any two agents here, and it comes from how the human reaches them, not from rank.
+The starting session uses its host's asynchronous execution tools. Claude Code backgrounds one wait and receives a task notification when it returns. Codex starts one yielded shell process and polls its tool session while keeping the turn active. Neither should start duplicate listeners or assume a running process will wake a finished turn. Read [host integration](hosts.md) for the exact mechanism. This changes how the participant listens, not its role in the debate.
 
 ### Pausing once every agent has finished
 
@@ -281,7 +277,7 @@ The hard part is *once the work is done*. Pausing an agent that is still working
 1. **No new work for `idle_pause` seconds** (default `IDLE_PAUSE`, 60). This is the newest of three stamps: `.partner/activity`, written by every command that is a message or an instruction (`send`, `kickoff`, `claim`, `baton --to`, `spawn`, a human prompt); the last non-system message; and the newest agent's `started`.
 2. **Every running agent has finished** (`agent_busy` returns nothing for it):
    - **it is in `wait`.** `is_listening` means a `wait` is in flight right now;
-   - **it is not mid-turn.** The session agent's background `wait` keeps running while it works on what the human asked, so a `wait` in flight proves nothing about it. `hook-prompt` (UserPromptSubmit) writes `<id>/turn`, and `hook-stop` removes it only when the stop actually goes through. A marker older than `TURN_STALE` (30 min) is an interrupted turn and stops counting;
+   - **it is not mid-turn.** The session agent's background `wait` keeps running while it works on what the human asked, so a `wait` in flight proves nothing about it. `hook-prompt` (UserPromptSubmit) writes `<id>/turn`, and `hook-stop` removes it when the stop goes through. A bound Codex session clears the marker when it enters its polled wait, since its harness turn stays active while listening; a delivered work message reopens it. A prompt arriving during that wait still opens the marker and prevents premature pausing. A marker older than `TURN_STALE` (30 min) is an interrupted turn and stops counting;
    - **it owes nobody a reply.** `pending_for` is empty, the same check the Stop hook and re-delivery use;
    - **it has been finished for `idle_pause` seconds straight.** `<id>/idle_since` starts when a polling `wait` finds nothing to hand over. It is deleted whenever `wait` hands the agent messages, whenever the agent sends or claims (`mark_active`), and when a session agent's turn opens, and it restarts when a session agent's turn closes. Between two empty waits an agent spends one model turn re-arming; a gap up to `REARM_GAP` (60s, from `<id>/lastwait`) continues the streak, and a longer one means it was doing something, so the streak starts over.
 3. **Every agent can be woken by a message** (`wakeable`). Either its tab can be typed into (`typable`: its terminal entry has a `send` template and the tab is on record), or it sleeps through the pause (`sleeps_through_pause`: a session agent that is not typable, whose background `wait` can sleep for free). A pause that strands a tab nobody can type into saves tokens by losing the partner, so it does not happen.
@@ -403,7 +399,7 @@ Agent-facing wording is edited in `prompts.py`, and timings are tuned in `timing
 
 **The session agent idle while the human works in a tab.** It had no background `wait` armed, so nothing re-invoked it when a partner addressed `@all`. Its briefing arms one at the end of every turn; if it stopped, the next human turn in the main session re-arms it, and the Stop hook blocks it from ending a turn with an unanswered message in the meantime. Check `.partner/<id>/lastseen` — a fresh stamp means the background `wait` is running.
 
-**The Stop hook never fires.** It needs `bash` and Python on `PATH`, and `hooks.json` is read once at session start — a session already open when the plugin was installed will not have it. Restart. `partner.py hook-stop < /dev/null` from the repo root should print nothing and exit 0; so should `hook-prompt`.
+**The Stop hook never fires.** It needs `bash` and Python on `PATH`, and `hooks.json` is read once at session start — a session already open when the plugin was installed will not have it. Restart. `partner.py hook-stop < /dev/null` from the repo root should print `{}` and exit 0; `hook-prompt` should print nothing and exit 0. In Codex, confirm the plugin hooks are trusted before testing the host events.
 
 **Advisors only ever reply to the baton holder.** They should also debate each other — `send --to p3`, not just `--to @all` — and hand the holder a joint view. If the transcript is all spokes to one hub, the briefing's "you advise, and you discuss" step is being skipped; `send` one of them a direct question to seed it.
 

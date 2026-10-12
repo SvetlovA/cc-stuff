@@ -9,13 +9,9 @@ from __future__ import annotations
 
 WAIT_POLL = 3.0
 
-# Every agent runs `wait` through its CLI's own shell tool, and every such tool
-# caps how long a command may run. A default at or above a cap turns every
-# normal wait into a tool error, which is what teaches an agent that the
-# command is broken. 90s sits under the caps seen so far (120s and 10s on the
-# two CLIs measured) and still stamps a heartbeat well inside LIVE_WINDOW.
-# Agents whose cap is shorter are told to raise it or re-run -- see
-# GENERIC_WAIT_NOTE.
+# Keep each wait below Claude's default Bash timeout while stamping heartbeats
+# inside LIVE_WINDOW. Codex execution tools can yield a still-running process;
+# their yield interval is not a command lifetime -- see the provider wait_note.
 WAIT_TIMEOUT = 90
 
 NUDGE_WINDOW = 120         # seconds between nudges to the same silent agent
