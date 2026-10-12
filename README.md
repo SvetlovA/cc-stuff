@@ -1,13 +1,13 @@
-# cc-stuff — Claude Code Plugin Marketplace
+# cc-stuff — Claude Code and Codex Plugin Marketplace
 
-A public collection of Claude Code plugins for developer workflows. Install any plugin directly into Claude Code to extend its capabilities.
+A public collection of plugins for developer workflows. See each plugin for its supported hosts and installation instructions.
 
 ## Available Plugins
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
 | [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 1.0.0 |
-| [pr-review-toolkit](./pr-review-toolkit/) | Fetch active PR review comments, apply code fixes, and resolve threads automatically | 0.6.1 |
+| [pr-review-toolkit](./pr-review-toolkit/) | Address supplied review feedback or fetch GitHub PR and Orca editor comments in Claude Code and Codex | 0.7.0 |
 
 ## Installing a Plugin
 
@@ -58,17 +58,19 @@ Runs several AI agents as equal partners, each in its own terminal tab, so decis
 
 ### [pr-review-toolkit](./pr-review-toolkit/)
 
-Addresses GitHub PR review comments end-to-end:
+Addresses review comments through one shared fixing workflow and two fetching wrappers:
 
-- Detects the current PR or lets you pick from a list
-- Fetches **all active** inline threads and general comments (skips resolved and already-replied threads; outdated threads are included and labeled)
-- Evaluates scope and recommends **address on the fly** (simple, few files) or **create a plan first** (complex, cross-file, architectural)
-- On the fly: applies fixes and resolves threads in one pass, then prompts to commit
-- Plan mode: delegates to `/planning:make` (optional dependency) to produce a structured plan ending with thread resolution and `git push`
+- `address-review-comments` accepts review text, structured arguments, or a comments file without fetching
+- `gh-address-review-comments` detects/selects a PR, fetches active inline threads and general comments, then passes them to the shared skill
+- `orca-address-review-comments` fetches notes left directly in Orca's editor/diff or Markdown preview, then passes them to the shared skill
+- The shared skill summarizes feedback, recommends on-the-fly fixes or planning, applies changes, and reports validation results
+- Resolution, replies, Orca note cleanup, commits, and pushing remain manual
 
-**Invoke with:** `/pr-review-toolkit:address-review-comments [pr-number]`
+**Claude Code:** `/pr-review-toolkit:address-review-comments <comments>`, `/pr-review-toolkit:gh-address-review-comments [pr-number]`, `/pr-review-toolkit:orca-address-review-comments [worktree-selector]`
 
-**Requires:** `gh` CLI authenticated
+**Codex:** `$address-review-comments <comments>`, `$gh-address-review-comments [pr-number]`, `$orca-address-review-comments [worktree-selector]`
+
+**Requires:** supplied feedback for the shared skill; authenticated `gh` for the GitHub wrapper; a reachable Orca runtime/CLI for the Orca wrapper. See the [plugin README](./pr-review-toolkit/README.md) for installation in each host.
 
 ---
 

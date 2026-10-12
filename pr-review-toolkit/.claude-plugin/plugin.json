@@ -1,7 +1,7 @@
 {
   "name": "pr-review-toolkit",
-  "version": "0.6.1",
-  "description": "Tools for working with GitHub pull request reviews — fetch active comments and apply code fixes. Thread resolution and pushing are left to the user.",
+  "version": "0.7.0",
+  "description": "Address supplied review feedback, or fetch GitHub PR and Orca editor comments before applying code fixes. Thread resolution and pushing are left to the user.",
   "author": {
     "name": "SvetlovA",
     "url": "https://github.com/SvetlovA"
@@ -9,7 +9,14 @@
   "homepage": "https://github.com/SvetlovA/cc-stuff/tree/master/pr-review-toolkit",
   "repository": "https://github.com/SvetlovA/cc-stuff",
   "license": "MIT",
-  "keywords": ["github", "pull-request", "code-review", "automation"],
+  "keywords": [
+    "github",
+    "orca",
+    "pull-request",
+    "code-review",
+    "claude",
+    "codex"
+  ],
   "optionalDependencies": [
     {
       "name": "planning",
