@@ -40,7 +40,10 @@ def _probed_tui(pr: dict, c: dict) -> list[str]:
         argv += [pr["model_flag"], c["model"]]
     if c["effort"] and pr.get("effort_flag"):
         argv += [pr["effort_flag"], c["effort"]]
-    argv += pr.get("auto", {}).get(c["auto"], [])
+    found = pr.get("auto", {})
+    # Probing cannot tell a CLI's reviewer from its bypass, so `auto` on a
+    # probed CLI means the accept-edits flag -- never the bypass flag.
+    argv += found.get(c["auto"]) or (found.get("edits", []) if c["auto"] == "auto" else [])
     if pr.get("prompt_flag"):
         argv += [pr["prompt_flag"], c["prompt"]]
         return argv
@@ -49,7 +52,7 @@ def _probed_tui(pr: dict, c: dict) -> list[str]:
 
 def build_tui(p: dict, prompt: str) -> list[str]:
     c = {"prompt": prompt, "model": p.get("model") or "",
-         "effort": p.get("effort") or "", "auto": p.get("auto") or "edits"}
+         "effort": p.get("effort") or "", "auto": p.get("auto") or "auto"}
     prov = p["provider"]
     if prov == "custom":
         return _custom_tui(p.get("cmd") or "", c)

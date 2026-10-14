@@ -54,7 +54,7 @@ def cmd_init(args) -> int:
             "provider": getattr(args, "me_provider", None) or session_host() or "claude",
             "model": getattr(args, "me_model", None),
             "effort": getattr(args, "me_effort", None),
-            "auto": getattr(args, "me_auto", None) or "edits",
+            "auto": getattr(args, "me_auto", None) or "auto",
             "cmd": None, "kind": "session",
             "status": "running", "started": utcnow(),
             "tab": "this session",

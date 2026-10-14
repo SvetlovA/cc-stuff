@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from partner_agents import state
 from partner_agents.briefing import build_seed
 from partner_agents.commands import hooks, messaging, session
+from partner_agents.providers.launch import _probed_tui, build_tui
 from partner_agents.transcript import append_msg
 from validate_plugins import validate
 
@@ -206,6 +207,22 @@ class HostCompatibility(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             messaging.cmd_wait(args)
         self.assertTrue(turn.exists())
+
+    def test_partners_launch_in_auto_mode_by_default(self):
+        cases = {'claude': ['--permission-mode', 'auto'],
+                 'codex': ['--approve-for-me'],
+                 'gemini': ['--approval-mode', 'yolo']}
+        for provider, flags in cases.items():
+            with self.subTest(provider=provider):
+                argv = build_tui({'provider': provider}, 'go')
+                self.assertEqual(argv[1:1 + len(flags)], flags)
+
+    def test_probed_cli_auto_never_uses_bypass_flag(self):
+        probe = {'bin': 'mycli', 'name': 'mycli', 'prompt_flag': None,
+                 'auto': {'edits': ['--auto-edit'], 'full': ['--yolo']}}
+        self.assertEqual(_probed_tui(probe, {'prompt': 'go', 'model': '',
+                                             'effort': '', 'auto': 'auto'}),
+                         ['mycli', '--auto-edit', 'go'])
 
 
 if __name__ == '__main__':

@@ -7,8 +7,14 @@ output formats to parse -- which is why an unlisted CLI needs only a template.
 
 AUTO LEVELS
   ask    leave the CLI's own prompting alone
-  edits  auto-accept file edits, still sandboxed        (default)
+  edits  auto-accept file edits, still sandboxed
+  auto   the CLI's own reviewer approves each action  (default)
   full   no prompts and no sandbox
+
+`auto` is the default because `edits` still asks before every shell command
+-- including the partner's own `wait` loop, so a partner launched that way
+sits at a prompt in a tab nobody is watching. A CLI with no reviewer of its
+own (gemini) gets its no-prompt mode at `auto`.
 
 Flags verified against claude 2.x and codex 0.5x. They drift between
 releases; this table is the single place to correct them.
@@ -22,14 +28,15 @@ from __future__ import annotations
 from ..prompts import EFFORT_HINT
 
 
-AUTO_LEVELS = ("ask", "edits", "full")
+AUTO_LEVELS = ("ask", "edits", "auto", "full")
 
 
 def _claude_tui(c: dict) -> list[str]:
     argv = ["claude"]
     if c["model"]:
         argv += ["--model", c["model"]]
-    mode = {"edits": "acceptEdits", "full": "bypassPermissions"}.get(c["auto"])
+    mode = {"edits": "acceptEdits", "auto": "auto",
+            "full": "bypassPermissions"}.get(c["auto"])
     if mode:
         argv += ["--permission-mode", mode]
     return argv + [c["prompt"]]
@@ -43,6 +50,8 @@ def _codex_tui(c: dict) -> list[str]:
         argv += ["-c", f'model_reasoning_effort="{c["effort"]}"']
     if c["auto"] == "edits":
         argv += ["-a", "never", "-s", "workspace-write"]
+    elif c["auto"] == "auto":
+        argv += ["--approve-for-me"]
     elif c["auto"] == "full":
         argv += ["--dangerously-bypass-approvals-and-sandbox"]
     return argv + [c["prompt"]]
@@ -52,7 +61,7 @@ def _gemini_tui(c: dict) -> list[str]:
     argv = ["gemini"]
     if c["model"]:
         argv += ["-m", c["model"]]
-    mode = {"edits": "auto_edit", "full": "yolo"}.get(c["auto"])
+    mode = {"edits": "auto_edit", "auto": "yolo", "full": "yolo"}.get(c["auto"])
     if mode:
         argv += ["--approval-mode", mode]
     return argv + ["-i", c["prompt"]]

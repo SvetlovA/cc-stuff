@@ -133,7 +133,7 @@ The line that gets typed opens by saying it is an automated wake-up and **not** 
 This is now genuinely rare — it means the host terminal could not be identified *or* driven, no described terminal is installed, and the platform's own default terminal is absent too. Headless servers, SSH sessions without a display, and containers are where it happens. `spawn` still registers the partner and prints the exact command to run:
 
 ```
-p2 (codex/gpt-5-codex/high, auto=edits) registered, but no terminal could be opened.
+p2 (codex/gpt-5-codex/high, auto=auto) registered, but no terminal could be opened.
 Open a tab yourself and run:
   bash "/repo/.partner/p2/run.sh"
 ```
@@ -145,7 +145,7 @@ Relay that command rather than reporting the spawn as failed — everything exce
 `terminals` says where partners will open before anything is spawned. `list` shows the method that was actually used per partner:
 
 ```
-  p2       codex    gpt-5-codex   effort=high   auto=edits [running] Orca tab
+  p2       codex    gpt-5-codex   effort=high   auto=auto [running] Orca tab
 ```
 
 An empty method column means the agent is registered but its runner has not been started.

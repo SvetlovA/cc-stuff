@@ -13,7 +13,7 @@ A partner is a **separate process** with its own provider, model, and context �
 - **Any CLI, three ways.** Name a binary directly and its flags are read from `--help`; pass the exact command with `--cmd 'mycli --model {model} --yes {prompt}'`; or describe it once in `~/.claude/partner-providers.json` and use it by name forever after.
 - **Tells you before it fails.** Checks the CLI is installed and actually runs, and the effort level is one that provider accepts — each hard problem reported with the command that fixes it, before a tab is opened. Things it merely does not *recognise* are said out loud and then done anyway.
 - **Every partner is a full interactive session.** Walk into any tab and type at that agent directly — it answers you, then goes back to debating. Between your interruptions it drives itself.
-- **No permission dialogs to babysit.** Partners start with prompting relaxed (`--auto ask | edits | full`), so you are not approving edits in three tabs at once.
+- **No permission dialogs to babysit.** Partners start with prompting relaxed (`--auto auto` by default — the CLI's own reviewer approves each action; `--auto full` skips every check), so you are not approving edits in three tabs at once.
 - **Joins mid-work with the context intact.** Spawn a partner twenty exchanges into a hard problem and it arrives knowing the branch, the uncommitted diff, and the argument so far — plus whatever briefing you write. Each partner keeps its own, so adding a third never overwrites what the second was told.
 - **Asks what to start on, and takes any answer.** Once the partners are up you are asked what to work on — free text, a bug, a doubt, or another skill or slash command to run through the debate. Say nothing and the agents orient themselves instead: they split this repository between them, read it, cite `path:line`, and hand each other one grounded picture of what it is and what to be careful with — editing nothing, converging in two rounds, then waiting for you. Your first real question is not answered from a cold read.
 - **Debates every question.** Once a partner is running, the skill puts each question and decision to it, weighs the pushback against the actual code, and reports the argument rather than hiding it.
@@ -85,11 +85,11 @@ Then just keep working. Every question after that gets debated before it gets an
 
 ## Providers
 
-| Provider | Effort control | Auto-approval at `--auto edits` |
-|----------|---------------|----------------------------------|
-| `claude` | prompt hint | `--permission-mode acceptEdits` |
-| `codex` | `model_reasoning_effort` (native) | `-a never -s workspace-write` |
-| `gemini` | prompt hint | `--approval-mode auto_edit` |
+| Provider | Effort control | Auto-approval at `--auto auto` (default) |
+|----------|---------------|------------------------------------------|
+| `claude` | prompt hint | `--permission-mode auto` |
+| `codex` | `model_reasoning_effort` (native) | `--approve-for-me` |
+| `gemini` | prompt hint | `--approval-mode yolo` |
 | `custom` | template | your own flag, in the template |
 | anything else on your machine | read from its `--help` | read from its `--help` |
 
@@ -102,7 +102,7 @@ partner.py probe --provider mycli   # the flags read from its help, and the comm
 partner.py spawn --provider mycli --model ... --effort high
 ```
 
-Probing is conservative: a flag it did not find is a flag it does not pass, so an unknown CLI launches on its own defaults rather than on a guess. `--auto edits` deliberately never falls back to a sandbox-bypass flag.
+Probing is conservative: a flag it did not find is a flag it does not pass, so an unknown CLI launches on its own defaults rather than on a guess. `--auto auto` and `--auto edits` deliberately never fall back to a sandbox-bypass flag.
 
 When the derived command is wrong, give the exact one:
 

@@ -186,7 +186,7 @@ def cmd_probe(args) -> int:
         try:
             demo = subprocess.list2cmdline(build_tui(
                 {"provider": name, "model": "<model>", "effort": "high",
-                 "auto": "edits", "cmd": spec.get("cmd")}, "<starting prompt>"))
+                 "auto": "auto", "cmd": spec.get("cmd")}, "<starting prompt>"))
         except SystemExit:
             demo = None
     if args.json:

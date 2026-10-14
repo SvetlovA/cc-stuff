@@ -77,12 +77,13 @@ A partner sits in its own tab. A permission prompt there is easy to miss and sil
 | `--auto` | claude | codex | gemini | probed CLI |
 |----------|--------|-------|--------|------------|
 | `ask` | *(no flag)* | *(no flag)* | *(no flag)* | *(no flag)* |
-| `edits` *(default)* | `--permission-mode acceptEdits` | `-a never -s workspace-write` | `--approval-mode auto_edit` | whatever its help offers at that level, or nothing |
+| `edits` | `--permission-mode acceptEdits` | `-a never -s workspace-write` | `--approval-mode auto_edit` | whatever its help offers at that level, or nothing |
+| `auto` *(default)* | `--permission-mode auto` | `--approve-for-me` | `--approval-mode yolo` | its `edits` flag, never its bypass flag |
 | `full` | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--approval-mode yolo` | its bypass flag, if it has one |
 
-`edits` is the working default: file edits go through, but the CLI's sandbox still applies to commands. `full` removes the sandbox too — reasonable inside a container or a throwaway clone, not on a machine you care about.
+`auto` is the working default: the CLI's own reviewer approves each edit and command, so nothing waits on a human. `edits` is not enough on its own — Claude still asks before every shell command, including the partner's own `wait` loop, and the partner sits at a prompt in a tab nobody is watching. Gemini has no reviewer, so its `auto` is its no-prompt mode. `full` skips every check and removes the sandbox — reasonable inside a container or a throwaway clone, not on a machine you care about.
 
-**This is why the baton is a convention rather than a sandbox.** At `edits` or `full` every partner is technically able to write. The baton is enforced by every agent's briefing telling it to check `list` first, not by a flag. For hard enforcement, spawn with `--auto ask` — the CLI will then stop and ask before it writes anything.
+**This is why the baton is a convention rather than a sandbox.** At `edits`, `auto` or `full` every partner is technically able to write. The baton is enforced by every agent's briefing telling it to check `list` first, not by a flag. For hard enforcement, spawn with `--auto ask` — the CLI will then stop and ask before it writes anything.
 
 ## Choosing a model
 

@@ -65,8 +65,8 @@ def main() -> int:
     sp.add_argument("--provider", required=True)
     sp.add_argument("--model", default=None)
     sp.add_argument("--effort", default=None, choices=["low", "medium", "high", "max"])
-    sp.add_argument("--auto", default="edits", choices=list(AUTO_LEVELS),
-                    help="permission prompting: ask | edits (default) | full")
+    sp.add_argument("--auto", default="auto", choices=list(AUTO_LEVELS),
+                    help="permission prompting: ask | edits | auto (default) | full")
     sp.add_argument("--name", default=None, help="agent id (default p2, p3, ...)")
     sp.add_argument("--cmd", default=None, help="command template for --provider custom")
     sp.add_argument("--context", default=None, help="handoff text, or path to a file")

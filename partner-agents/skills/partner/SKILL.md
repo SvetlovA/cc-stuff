@@ -282,7 +282,7 @@ python "$P" resume [--session <id>]         # rebuild every agent, re-briefed
 python "$P" archive [--label "..."]         # file the current session away
 python "$P" snapshot                        # repo state captured for a new partner
 python "$P" spawn --provider X [--model M] [--effort low|medium|high|max]
-                  [--auto ask|edits|full] [--name id] [--context TEXT|PATH]
+                  [--auto ask|edits|auto|full] [--name id] [--context TEXT|PATH]
                   [--terminal X]            # override the terminal choice
                   [--cmd 'template']        # with --provider custom
                   [--force]                 # accept a model the list does not know

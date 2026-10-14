@@ -16,7 +16,7 @@
 
 **A partner's tab opens on a usage error and closes.** Its flags were probably derived from `--help` and got something wrong. `probe --provider <name>` prints the exact command a spawn builds; `.partner/<id>/run.cmd` (or `run.sh`) holds the one that was actually used. Correct it with `--provider custom --cmd '<the right command with {prompt}>'`, or keep the fix in `~/.claude/partner-providers.json`.
 
-**A partner keeps stopping to ask permission.** Its CLI advertised no accept-edits flag, so `--auto edits` passed nothing — deliberately, since substituting a sandbox-bypass flag would silently do far more than was asked. `probe` shows which auto levels it found. Either pass the CLI's own flag in a `--cmd` template, or spawn with `--auto full` if that is genuinely wanted.
+**A partner keeps stopping to ask permission.** It was spawned with `--auto edits` or `ask` — respawn with the default `--auto auto`, or `--auto full`. On a probed CLI: it advertised no accept-edits flag, so `auto` and `edits` passed nothing — deliberately, since substituting a sandbox-bypass flag would silently do far more than was asked. `probe` shows which auto levels it found. Either pass the CLI's own flag in a `--cmd` template, or spawn with `--auto full` if that is genuinely wanted.
 
 **`models` lists junk, or nothing.** Ids under "only the shape of a model id" are text that merely looks like a model — that heading is the warning. An empty list means nothing on this machine names a model for that CLI: its default model still works (spawn without `--model`), or look the current lineup up on the web and pass one. A model released after the CLI was built is mentioned nowhere locally.
 
