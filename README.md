@@ -6,6 +6,7 @@ A public collection of plugins for developer workflows. See each plugin for its 
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
+| [code-explainer](./code-explainer/) | Explain a file, plan, diff, branch, PR, module or whole project with ASCII diagrams, notes, tables and `file:line` links | 0.1.0 |
 | [partner-agents](./partner-agents/) | Run AI agents as equal partners in their own terminal tabs (Orca-aware), debating every decision with you, with an exclusive write baton | 1.1.0 |
 | [pr-review-toolkit](./pr-review-toolkit/) | Address supplied review feedback or fetch GitHub PR and Orca editor comments in Claude Code and Codex | 0.7.1 |
 
@@ -15,28 +16,30 @@ A public collection of plugins for developer workflows. See each plugin for its 
 
 ```bash
 claude plugin marketplace add SvetlovA/cc-stuff
+claude plugin install code-explainer@SvetlovA-cc-stuff
 claude plugin install partner-agents@SvetlovA-cc-stuff
 claude plugin install pr-review-toolkit@SvetlovA-cc-stuff
 ```
 
-Invoke skills with `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
+Invoke skills with `/code-explainer:explain`, `/partner-agents:partner` or `/pr-review-toolkit:address-review-comments`.
 
 ### Codex
 
 ```bash
 codex plugin marketplace add SvetlovA/cc-stuff
+codex plugin add code-explainer@SvetlovA-cc-stuff
 codex plugin add partner-agents@SvetlovA-cc-stuff
 codex plugin add pr-review-toolkit@SvetlovA-cc-stuff
 ```
 
-Invoke skills with `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.
+Invoke skills with `$explain`, `$partner` or `$address-review-comments`. Codex in the desktop app can also install from the registered marketplace through its Plugins UI. Review and trust the partner plugin's hooks in Codex before using them. See [Codex packaging](https://developers.openai.com/plugins/build/plugins) for marketplace and hook support.
 
 ### Local development
 
 ```bash
 git clone https://github.com/SvetlovA/cc-stuff.git
 cd cc-stuff
-claude --plugin-dir ./partner-agents --plugin-dir ./pr-review-toolkit
+claude --plugin-dir ./code-explainer --plugin-dir ./partner-agents --plugin-dir ./pr-review-toolkit
 ```
 
 For Codex, register the checkout with `codex plugin marketplace add .`, then install the plugins with the same `codex plugin add` commands above. Restart the host session after changing installed plugin files.
@@ -44,6 +47,24 @@ For Codex, register the checkout with `codex plugin marketplace add .`, then ins
 Both hosts use the same skills and scripts. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json`. Each plugin includes a manifest for each host.
 
 ## Plugin Overview
+
+### [code-explainer](./code-explainer/)
+
+Explains code so it is understood on the first read. Give it a file, a plan, `changes`, `branch`, a PR number, a commit, a directory, `project` or a question; with no argument it explains the conversation's subject or asks what to explain:
+
+- The core idea first, then the big-picture diagram, then one section per important part
+- ASCII diagrams of flows, loops and timelines, each followed by a plain-language **Note:**
+- Tables for "what goes where", before/after, settings and rules instead of bullet walls
+- Clickable `file:line` links to the exact code behind every claim, with line numbers read from the files
+- Only the important parts, with unverified or open items called out honestly; read-only
+
+**Claude Code:** `/code-explainer:explain [target] [focus]` (or `/explain` when copied to `~/.claude/skills/`)
+
+**Codex:** `$explain [target] [focus]`
+
+**Requires:** `git`; an authenticated `gh` for pull requests
+
+---
 
 ### [partner-agents](./partner-agents/)
 

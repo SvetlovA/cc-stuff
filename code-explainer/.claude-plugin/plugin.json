@@ -1,0 +1,21 @@
+{
+  "name": "code-explainer",
+  "version": "0.1.0",
+  "description": "Explain a file, plan, diff, branch, pull request, module or whole project in plain language, with ASCII diagrams, a note under each diagram, tables and clickable links to the exact lines.",
+  "author": {
+    "name": "SvetlovA",
+    "url": "https://github.com/SvetlovA"
+  },
+  "homepage": "https://github.com/SvetlovA/cc-stuff/tree/master/code-explainer",
+  "repository": "https://github.com/SvetlovA/cc-stuff",
+  "license": "MIT",
+  "keywords": [
+    "explain",
+    "code-walkthrough",
+    "pull-request",
+    "onboarding",
+    "documentation",
+    "claude",
+    "codex"
+  ]
+}

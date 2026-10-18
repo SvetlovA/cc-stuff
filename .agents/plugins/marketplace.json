@@ -5,6 +5,18 @@
   },
   "plugins": [
     {
+      "name": "code-explainer",
+      "source": {
+        "source": "local",
+        "path": "./code-explainer"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
       "name": "partner-agents",
       "source": {
         "source": "local",
